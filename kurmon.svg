@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Kurmon</title>
+  <rect x="3" y="3" width="58" height="58" rx="14" fill="#17232b"/>
+  <path d="M15 13h7v38h-7z" fill="#f3f8f7"/>
+  <path d="M22 30 41 13h10L31 32 51 51H41L22 34z" fill="#56dbc6"/>
+</svg>

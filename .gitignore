@@ -1,0 +1,34 @@
+/target/
+/dist/
+
+# Local editor and OS files
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+*.kdbx
+.netrc
+_netrc
+.npmrc
+id_rsa
+id_ed25519
+
+# Machine-specific settings and diagnostic output
+settings.ini
+*.log
+*.dmp
+*.mdmp
