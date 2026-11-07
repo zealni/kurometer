@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod displays;
+mod history;
 mod layout;
 mod metrics;
 #[path = "../tools/placement.rs"]
@@ -105,6 +106,14 @@ unsafe extern "system" {
     fn EndPaint(hwnd: H, p: *const Paint) -> i32;
     fn FillRect(dc: H, r: *const Rect, brush: H) -> i32;
     fn DrawTextW(dc: H, text: *const u16, len: i32, r: *mut Rect, flags: u32) -> i32;
+    fn GetDC(hwnd: H) -> H;
+    fn ReleaseDC(hwnd: H, dc: H) -> i32;
+    fn GetSystemMetrics(index: i32) -> i32;
+    fn GetClientRect(hwnd: H, rect: *mut Rect) -> i32;
+    fn ScrollWindowEx(hwnd: H, dx: i32, dy: i32, scroll: *const Rect, clip: *const Rect, update: H, rect: *mut Rect, flags: u32) -> i32;
+    fn SetScrollRange(hwnd: H, bar: i32, min: i32, max: i32, redraw: i32) -> i32;
+    fn SetScrollPos(hwnd: H, bar: i32, pos: i32, redraw: i32) -> i32;
+    fn GetScrollPos(hwnd: H, bar: i32) -> i32;
     fn SetTimer(hwnd: H, id: usize, ms: u32, callback: H) -> usize;
     fn KillTimer(hwnd: H, id: usize) -> i32;
     fn PostQuitMessage(code: i32);
@@ -158,6 +167,10 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn CreateSolidBrush(color: u32) -> H;
     fn DeleteObject(h: H) -> i32;
+    fn CreatePen(style: i32, width: i32, color: u32) -> H;
+    fn MoveToEx(dc: H, x: i32, y: i32, old: *mut [i32; 2]) -> i32;
+    fn LineTo(dc: H, x: i32, y: i32) -> i32;
+    fn EnumFontFamiliesExW(dc: H, font: *const LogFont, callback: Option<unsafe extern "system" fn(*const LogFont, *const c_void, u32, isize) -> i32>, data: isize, flags: u32) -> i32;
     fn SetTextColor(dc: H, color: u32) -> u32;
     fn SetBkMode(dc: H, mode: i32) -> i32;
     fn CreateFontW(
@@ -189,6 +202,69 @@ unsafe extern "system" {
 #[link(name = "shell32")]
 unsafe extern "system" {
     fn Shell_NotifyIconW(message: u32, data: *const Notify) -> i32;
+}
+#[repr(C)]
+struct LogFont {
+    height: i32, width: i32, escapement: i32, orientation: i32, weight: i32,
+    italic: u8, underline: u8, strikeout: u8, charset: u8,
+    out_precision: u8, clip_precision: u8, quality: u8, pitch_family: u8,
+    face: [u16; 32],
+}
+
+unsafe extern "system" fn collect_font(font: *const LogFont, _: *const c_void, _: u32, data: isize) -> i32 {
+    unsafe {
+        let face = &(*font).face;
+        let len = face.iter().position(|&c| c == 0).unwrap_or(face.len());
+        let name = String::from_utf16_lossy(&face[..len]);
+        if !name.is_empty() && !name.starts_with('@') {
+            (&mut *(data as *mut Vec<String>)).push(name);
+        }
+        1
+    }
+}
+
+fn installed_fonts(hwnd: H) -> Vec<String> {
+    unsafe {
+        let dc = GetDC(hwnd);
+        let mut fonts: Vec<String> = Vec::new();
+        if !dc.is_null() {
+            let mut font: LogFont = std::mem::zeroed();
+            font.charset = 1;
+            EnumFontFamiliesExW(dc, &font, Some(collect_font), &mut fonts as *mut _ as isize, 0);
+            ReleaseDC(hwnd, dc);
+        }
+        fonts.sort_unstable_by_key(|name| name.to_lowercase());
+        fonts.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        fonts
+    }
+}
+
+fn draw_history(dc: H, history: &history::History, index: usize, rect: Rect, color: u32) {
+    let count = history.points(index).count();
+    if count == 0 || rect.right <= rect.left || rect.bottom <= rect.top {
+        return;
+    }
+    let max = if index < 3 { 100.0 } else {
+        history.points(index).flatten().fold(0.0_f64, f64::max).max(1.0)
+    };
+    unsafe {
+        let pen = CreatePen(0, 1, color);
+        if pen.is_null() { return; }
+        let old = SelectObject(dc, pen);
+        let mut connected = false;
+        for (i, point) in history.points(index).enumerate() {
+            if let Some(value) = point.filter(|v| v.is_finite()) {
+                let x = rect.right - 1 - ((count - 1 - i) as i32 * (rect.right - rect.left - 1) / 59);
+                let y = rect.bottom - 1 - (value.clamp(0.0, max) / max * (rect.bottom - rect.top - 1) as f64) as i32;
+                if connected { LineTo(dc, x, y); } else { MoveToEx(dc, x, y, null_mut()); }
+                connected = true;
+            } else {
+                connected = false;
+            }
+        }
+        SelectObject(dc, old);
+        DeleteObject(pen);
+    }
 }
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
@@ -252,6 +328,8 @@ struct App {
     config: settings::Settings,
     worker: worker::Worker,
     snapshot: sampler::Snapshot,
+    history: history::History,
+    history_stamp: Option<Instant>,
     devices: Vec<sampler::Adapter>,
     gpus: Vec<(String, String)>,
     font: H,
@@ -274,7 +352,6 @@ struct App {
     notice: String,
     hook: H,
     foreground_hook: H,
-    selected_font: u32,
 }
 unsafe fn app(hwnd: H) -> &'static mut App {
     unsafe { &mut *(GetWindowLongPtrW(hwnd, -21) as *mut App) }
@@ -725,7 +802,7 @@ fn details(hwnd: H) {
             100,
             500,
             450,
-            370,
+            570,
             a.controller,
             null_mut(),
             GetModuleHandleW(std::ptr::null()),
@@ -741,7 +818,7 @@ fn details(hwnd: H) {
             "Settings",
             501,
             24,
-            280,
+            480,
             110,
             32,
             0x10000 | 0xb,
@@ -752,7 +829,7 @@ fn details(hwnd: H) {
             "Task Manager",
             502,
             146,
-            280,
+            480,
             130,
             32,
             0x10000 | 0xb,
@@ -773,11 +850,11 @@ fn open_settings(hwnd: H) {
             0x80,
             wide("MonitorPanel").as_ptr(),
             wide("Kurmon Settings").as_ptr(),
-            0x80c80000,
-            150,
-            180,
+            0x80e80000,
+            20,
+            20,
             520,
-            820,
+            (GetSystemMetrics(1) - 40).min(930),
             a.controller,
             null_mut(),
             GetModuleHandleW(std::ptr::null()),
@@ -847,7 +924,7 @@ fn open_settings(hwnd: H) {
                 h,
                 "BUTTON",
                 label,
-                110 + i,
+                140 + i,
                 24 + (i as i32 % 3) * 145,
                 240 + (i as i32 / 3) * 35,
                 140,
@@ -917,14 +994,19 @@ fn open_settings(hwnd: H) {
             }
         }
         control(h, "STATIC", "Meter font", 0, 24, 515, 90, 22, 0);
-        for (id, label, x, value) in [
-            (120, "Segoe UI", 24, "Segoe UI"),
-            (121, "Arial", 155, "Arial"),
-            (122, "Consolas", 260, "Consolas"),
-        ] {
-            let style = 0x10000 | 9 | if id == 120 { 0x20000 } else { 0 };
-            let radio = control(h, "BUTTON", label, id, x, 510, 130, 26, style);
-            SendMessageW(radio, 0xf1, (a.config.font == value) as usize, 0);
+        let fonts = installed_fonts(h);
+        let font = control(h, "COMBOBOX", "", 120, 120, 510, 350, 250, 0x10000 | 3 | 0x200000);
+        let mut selected = false;
+        for name in &fonts {
+            let index = SendMessageW(font, 0x143, 0, wide(name).as_ptr() as isize);
+            if name.eq_ignore_ascii_case(&a.config.font) {
+                SendMessageW(font, 0x14e, index as usize, 0);
+                selected = true;
+            }
+        }
+        if !selected && !a.config.font.is_empty() {
+            let index = SendMessageW(font, 0x143, 0, wide(&a.config.font).as_ptr() as isize);
+            SendMessageW(font, 0x14e, index as usize, 0);
         }
         control(h, "STATIC", "Position in taskbar", 0, 24, 550, 180, 22, 0);
         let position = control(h, "COMBOBOX", "", 109, 205, 545, 265, 150, 0x10000 | 3);
@@ -968,29 +1050,33 @@ fn open_settings(hwnd: H) {
             SendMessageW(palette, 0x143, 0, wide(label).as_ptr() as isize);
         }
         SendMessageW(palette, 0x14e, a.config.palette as usize, 0);
-        control(
-            h,
-            "STATIC",
-            "Drag right edge to resize; narrow stacks, wide fits one row.",
-            0,
-            24,
-            685,
-            450,
-            22,
-            0,
-        );
-        control(
-            h,
-            "BUTTON",
-            "Save settings",
-            201,
-            24,
-            710,
-            160,
-            36,
-            0x10000 | 0xb,
-        );
-        control(h, "BUTTON", "Cancel", 202, 200, 710, 110, 36, 0x10000 | 0xb);
+        control(h, "STATIC", "Show metric labels", 0, 24, 685, 440, 22, 0);
+        for (i, label) in ["CPU", "GPU", "RAM", "Download", "Upload"].iter().enumerate() {
+            let check = control(
+                h, "BUTTON", label, 130 + i,
+                24 + (i as i32 % 3) * 145, 710 + (i as i32 / 3) * 30,
+                140, 26, 0x10000 | 3,
+            );
+            SendMessageW(check, 0xf1, a.config.labels[i] as usize, 0);
+        }
+        control(h, "STATIC", "RAM display", 0, 24, 780, 120, 22, 0);
+        let ram_format = control(h, "COMBOBOX", "", 135, 145, 775, 235, 120, 0x10000 | 3);
+        for label in ["Percent", "Used GiB", "Percent and used GiB"] {
+            SendMessageW(ram_format, 0x143, 0, wide(label).as_ptr() as isize);
+        }
+        SendMessageW(ram_format, 0x14e, a.config.ram_format as usize, 0);
+        control(h, "STATIC", "Show history charts", 0, 24, 815, 440, 22, 0);
+        for (i, label) in ["CPU chart", "GPU chart", "RAM chart", "Download chart", "Upload chart"].iter().enumerate() {
+            let check = control(h, "BUTTON", label, 150 + i,
+                24 + (i as i32 % 3) * 145, 840 + (i as i32 / 3) * 30,
+                140, 26, 0x10000 | 3);
+            SendMessageW(check, 0xf1, a.config.charts[i] as usize, 0);
+        }
+        control(h, "BUTTON", "Save settings", 201, 24, 910, 160, 36, 0x10000 | 0xb);
+        control(h, "BUTTON", "Cancel", 202, 200, 910, 110, 36, 0x10000 | 0xb);
+        let mut client = Rect::default();
+        GetClientRect(h, &mut client);
+        SetScrollRange(h, 1, 0, (960 - client.bottom).max(0), 1);
         ShowWindow(h, 5);
         SetForegroundWindow(h);
     }
@@ -1001,12 +1087,42 @@ fn get_child(hwnd: H, id: i32) -> H {
     }
     unsafe { GetDlgItem(hwnd, id) }
 }
+unsafe fn scroll_settings(hwnd: H, target: i32) {
+    unsafe {
+        let mut client = Rect::default();
+        GetClientRect(hwnd, &mut client);
+        let old = GetScrollPos(hwnd, 1);
+        let target = target.clamp(0, (960 - client.bottom).max(0));
+        if target != old {
+            SetScrollPos(hwnd, 1, target, 1);
+            ScrollWindowEx(hwnd, 0, old - target, std::ptr::null(), std::ptr::null(), null_mut(), null_mut(), 3);
+        }
+    }
+}
 unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize {
     unsafe {
         if GetWindowLongPtrW(hwnd, -21) == 0 {
             return DefWindowProcW(hwnd, msg, wp, lp);
         }
         match msg {
+            0x115 if hwnd == app(hwnd).settings => {
+                let pos = GetScrollPos(hwnd, 1);
+                let mut client = Rect::default();
+                GetClientRect(hwnd, &mut client);
+                let target = match wp & 0xffff {
+                    0 => pos - 30, 1 => pos + 30,
+                    2 => pos - client.bottom, 3 => pos + client.bottom,
+                    4 | 5 => (wp >> 16) as i32,
+                    6 => 0, 7 => 960, _ => pos,
+                };
+                scroll_settings(hwnd, target);
+                0
+            }
+            0x20a if hwnd == app(hwnd).settings => {
+                let delta = ((wp >> 16) as u16 as i16) as i32;
+                scroll_settings(hwnd, GetScrollPos(hwnd, 1) - delta);
+                0
+            }
             0x83 if hwnd == app(hwnd).meter => 0,
             0x85 if hwnd == app(hwnd).meter => 0,
             0x84 if hwnd == app(hwnd).meter => {
@@ -1076,26 +1192,32 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     return 0;
                 }
                 let a = app(hwnd);
-                let (next, stamp) = match a.worker.latest() {
-                    Some(value) => value,
+                let (next, stamp, sampled) = match a.worker.latest() {
+                    Some((snapshot, stamp)) => (snapshot, stamp, true),
                     None => {
                         if a.last.elapsed().as_secs() < u64::from(a.config.interval) * 3 {
                             return 0;
                         }
                         let mut stale = sampler::Snapshot::default();
                         stale.network_status = "Stale: waiting for sampler".into();
-                        (stale, a.last)
+                        (stale, a.last, false)
                     }
                 };
+                let new_sample = sampled && a.history_stamp != Some(stamp);
+                if new_sample {
+                    a.history.push(&next);
+                    a.history_stamp = Some(stamp);
+                }
                 let changed = percentage(next.cpu) != percentage(a.snapshot.cpu)
                     || percentage(next.gpu) != percentage(a.snapshot.gpu)
                     || percentage(next.ram) != percentage(a.snapshot.ram)
+                    || (a.config.ram_format != 0 && format!("{:.1}", next.used as f64 / 1073741824.0) != format!("{:.1}", a.snapshot.used as f64 / 1073741824.0))
                     || rate(next.download, a.config.bits)
                         != rate(a.snapshot.download, a.config.bits)
                     || rate(next.upload, a.config.bits) != rate(a.snapshot.upload, a.config.bits);
                 a.snapshot = next;
                 a.last = stamp;
-                if changed && a.visible && !a.blocked && !a.meter.is_null() {
+                if (changed || (new_sample && a.config.charts.iter().any(|&v| v))) && a.visible && !a.blocked && !a.meter.is_null() {
                     InvalidateRect(a.meter, std::ptr::null(), 0);
                 }
                 if !a.details.is_null() {
@@ -1124,9 +1246,6 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                 let a = app(hwnd);
                 match id {
                     501 => open_settings(a.controller),
-                    120..=122 => {
-                        a.selected_font = (id - 120) as u32;
-                    }
                     502 => {
                         let _ = std::process::Command::new("taskmgr.exe").spawn();
                     }
@@ -1153,8 +1272,13 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         next.bits = SendMessageW(get_child(hwnd, 104), 0xf0, 0, 0) == 1;
                         for i in 0..5 {
                             next.visible[i] =
-                                SendMessageW(get_child(hwnd, 110 + i as i32), 0xf0, 0, 0) == 1;
+                                SendMessageW(get_child(hwnd, 140 + i as i32), 0xf0, 0, 0) == 1;
+                            next.labels[i] =
+                                SendMessageW(get_child(hwnd, 130 + i as i32), 0xf0, 0, 0) == 1;
+                            next.charts[i] =
+                                SendMessageW(get_child(hwnd, 150 + i as i32), 0xf0, 0, 0) == 1;
                         }
+                        next.ram_format = SendMessageW(get_child(hwnd, 135), 0x147, 0, 0).clamp(0, 2) as u32;
                         let mut order = [0u16; 128];
                         let count = GetWindowTextW(get_child(hwnd, 106), order.as_mut_ptr(), 128);
                         next.order = String::from_utf16_lossy(&order[..count as usize]);
@@ -1169,12 +1293,11 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                             next.offset = -1;
                         }
                         next.locked = SendMessageW(get_child(hwnd, 112), 0xf0, 0, 0) == 1;
-                        next.font = match a.selected_font {
-                            1 => "Arial",
-                            2 => "Consolas",
-                            _ => "Segoe UI",
+                        let mut face = [0u16; 128];
+                        let count = GetWindowTextW(get_child(hwnd, 120), face.as_mut_ptr(), 128);
+                        if count > 0 {
+                            next.font = String::from_utf16_lossy(&face[..count as usize]);
                         }
-                        .into();
                         next.transparent = SendMessageW(get_child(hwnd, 114), 0xf0, 0, 0) == 1;
                         next.palette =
                             SendMessageW(get_child(hwnd, 115), 0x147, 0, 0).clamp(0, 2) as u32;
@@ -1254,7 +1377,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         .filter_map(|name| names.iter().position(|v| *v == name))
                         .filter(|i| a.config.visible[*i])
                         .collect::<Vec<_>>();
-                    let columns = layout::columns(a.config.width);
+                    let columns = if a.config.ram_format == 2 && a.config.visible[2] && a.config.width >= 480 { 3 } else { layout::columns(a.config.width) };
                     let cell_width = (a.config.width - 16) / columns as i32;
                     let widths = layout::row_widths(a.config.width, &selected);
                     let mut row_left = 8;
@@ -1283,10 +1406,29 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         let (prefix, value) = match i {
                             0 => ("CPU ", percentage(s.cpu)),
                             1 => ("GPU ", percentage(s.gpu)),
-                            2 => ("RAM ", percentage(s.ram)),
+                            2 => ("RAM ", match (s.ram, a.config.ram_format) {
+                                (Some(_), 1) => format!("{:.1} GiB", s.used as f64 / 1073741824.0),
+                                (Some(v), 2) => format!("{v:.0}% {:.1} GiB", s.used as f64 / 1073741824.0),
+                                _ => percentage(s.ram),
+                            }),
                             3 => ("↓ ", rate(s.download, a.config.bits)),
                             _ => ("↑ ", rate(s.upload, a.config.bits)),
                         };
+                        let prefix = if a.config.labels[i] { prefix } else { "" };
+                        let full_text = wide(&format!("{prefix}{value}"));
+                        let mut extent = [0; 2];
+                        GetTextExtentPoint32W(dc, full_text.as_ptr(), (full_text.len() - 1) as i32, &mut extent);
+                        let available = (right - left - if a.config.charts[i] { 18 } else { 0 }).max(1);
+                        let fitted_font = if extent[0] > available {
+                            let height = (16 * available / extent[0]).clamp(8, 16);
+                            let face = wide(&a.config.font);
+                            CreateFontW(-height, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr())
+                        } else {
+                            null_mut()
+                        };
+                        if !fitted_font.is_null() {
+                            SelectObject(dc, fitted_font);
+                        }
                         let used = [s.cpu, s.gpu, s.ram].get(i).copied().flatten();
                         let value_color = match used {
                             Some(v) if v >= 95.0 => {
@@ -1328,6 +1470,19 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         };
                         SetTextColor(dc, value_color);
                         DrawTextW(dc, wide(&value).as_ptr(), -1, &mut cell, 0x824);
+                        if a.config.charts[i] {
+                            let text = wide(&value);
+                            let mut value_size = [0; 2];
+                            GetTextExtentPoint32W(dc, text.as_ptr(), (text.len() - 1) as i32, &mut value_size);
+                            let chart_left = left + size[0] + value_size[0] + 3;
+                            if right - chart_left >= 8 {
+                                draw_history(dc, &a.history, i, Rect { left: chart_left, top: top + 2, right, bottom: top + cell_height - 2 }, accent);
+                            }
+                        }
+                        if !fitted_font.is_null() {
+                            SelectObject(dc, a.small);
+                            DeleteObject(fitted_font);
+                        }
                     }
                 } else if hwnd == a.details {
                     let name = a
@@ -1359,6 +1514,18 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         }
                     );
                     SetWindowTextW(get_child(hwnd, 600), wide(&text).as_ptr());
+                    let names = ["CPU", "GPU", "RAM", "Download", "Upload"];
+                    let mut row = 0;
+                    for i in 0..5 {
+                        if a.config.visible[i] && a.config.charts[i] {
+                            let top = 265 + row * 40;
+                            let mut label = Rect { left: 24, top, right: 115, bottom: top + 30 };
+                            SetTextColor(dc, fg);
+                            DrawTextW(dc, wide(names[i]).as_ptr(), -1, &mut label, 0x824);
+                            draw_history(dc, &a.history, i, Rect { left: 120, top, right: 410, bottom: top + 30 }, if light { rgb(0x0f, 0x6c, 0xbd) } else { rgb(0x4c, 0xc2, 0xff) });
+                            row += 1;
+                        }
+                    }
                 }
                 EndPaint(hwnd, &p);
                 0
@@ -1529,15 +1696,12 @@ fn main() {
         }
         let face = wide(&config.font);
         let font = CreateFontW(-16, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr());
-        let selected_font = match config.font.as_str() {
-            "Arial" => 1,
-            "Consolas" => 2,
-            _ => 0,
-        };
         let mut a = Box::new(App {
             worker: worker::Worker::new(config.clone()),
             config,
             snapshot: Default::default(),
+            history: history::History::new(),
+            history_stamp: None,
             devices,
             gpus,
             font,
@@ -1560,7 +1724,6 @@ fn main() {
             notice,
             hook: null_mut(),
             foreground_hook: null_mut(),
-            selected_font,
         });
         let hwnd = CreateWindowExW(
             0x08000080,
@@ -1607,6 +1770,25 @@ fn main() {
             if (!a.settings.is_null() && IsDialogMessageW(a.settings, &mut m) != 0)
                 || (!a.details.is_null() && IsDialogMessageW(a.details, &mut m) != 0)
             {
+                if !a.settings.is_null() {
+                    let focus = GetFocus();
+                    if IsChild(a.settings, focus) != 0 {
+                        let mut rect = Rect::default();
+                        let mut client = Rect::default();
+                        GetWindowRect(focus, &mut rect);
+                        GetClientRect(a.settings, &mut client);
+                        let mut top = [rect.left, rect.top];
+                        let mut bottom = [rect.right, rect.bottom];
+                        ScreenToClient(a.settings, &mut top);
+                        ScreenToClient(a.settings, &mut bottom);
+                        let pos = GetScrollPos(a.settings, 1);
+                        if top[1] < 0 {
+                            scroll_settings(a.settings, pos + top[1]);
+                        } else if bottom[1] > client.bottom {
+                            scroll_settings(a.settings, pos + bottom[1] - client.bottom);
+                        }
+                    }
+                }
                 continue;
             }
             TranslateMessage(&m);

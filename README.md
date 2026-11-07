@@ -13,7 +13,7 @@ cargo build --release --bin taskbar-system-monitor
 .\target\release\taskbar-system-monitor.exe
 ```
 
-The executable retains its existing name to preserve compatibility. Launching it again opens the existing instance. Avoid enabling startup for a temporary build path that you may later move.
+The executable retains its existing name to preserve compatibility. Its Windows file description is **Kurmon**, which identifies it in Task Manager; the Details tab still shows `taskbar-system-monitor.exe`. Launching it again opens the existing instance. Avoid enabling startup for a temporary build path that you may later move.
 
 ## Controls and settings
 
@@ -22,6 +22,10 @@ Left-click the meter or its notification-area icon to open the details panel. Ri
 When the background is transparent, click a visible character; transparent pixels pass through to the taskbar.
 
 Settings include the network and GPU adapters, refresh interval, bits or bytes, theme, font, transparent background, color palette, meter width and positioning, position lock, visible readings and their order, and optional sign-in startup. In the fallback overlay mode, positioning unlocked allows moving the meter and dragging its right edge to resize it; while hosted by the taskbar those gestures are unavailable, so use Settings.
+
+Choose which metrics, labels, and history charts appear individually. RAM can show percentage, used GiB, or both. CPU, GPU, and RAM readings turn red at 95% or above. The font selector lists installed Windows fonts; existing font preferences remain unchanged.
+
+Enabled charts appear beside taskbar readings and in the details panel. History retains the latest 60 samples in memory, at the selected refresh interval, and resets when Kurmon exits. Network charts scale to the maximum observed rate; they do not represent network capacity.
 
 In the single-row layout, readings stay grouped instead of spreading across the full width as the meter is widened.
 

@@ -6,6 +6,9 @@ pub struct Settings {
     pub bits: bool,
     pub theme: u32,
     pub visible: [bool; 5],
+    pub labels: [bool; 5],
+    pub charts: [bool; 5],
+    pub ram_format: u32,
     pub order: String,
     pub startup: bool,
     pub display: String,
@@ -26,6 +29,9 @@ impl Default for Settings {
             bits: false,
             theme: 0,
             visible: [true; 5],
+            labels: [true; 5],
+            charts: [false; 5],
+            ram_format: 0,
             order: "CPU,GPU,RAM,Download,Upload".into(),
             startup: false,
             display: String::new(),
@@ -33,7 +39,7 @@ impl Default for Settings {
             position: -1,
             offset: -1,
             locked: false,
-            font: "Segoe UI".into(),
+            font: "Segoe UI Variable".into(),
             transparent: false,
             palette: 0,
         }
@@ -76,6 +82,28 @@ impl Settings {
                         s.visible[i] = c == b'1';
                     }
                 }
+                "labels" => {
+                    if value.len() != 5 || !value.bytes().all(|c| c == b'0' || c == b'1') {
+                        return Err("Invalid meter labels".into());
+                    }
+                    for (i, c) in value.bytes().enumerate() {
+                        s.labels[i] = c == b'1';
+                    }
+                }
+                "charts" => {
+                    if value.len() != 5 || !value.bytes().all(|c| c == b'0' || c == b'1') {
+                        return Err("Invalid chart selection".into());
+                    }
+                    for (i, c) in value.bytes().enumerate() {
+                        s.charts[i] = c == b'1';
+                    }
+                }
+                "ram_format" => {
+                    s.ram_format = value.parse().map_err(|_| "Invalid RAM format")?;
+                    if s.ram_format > 2 {
+                        return Err("Invalid RAM format".into());
+                    }
+                }
                 "startup" => s.startup = value.parse().map_err(|_| "Invalid startup preference")?,
                 "order" => {
                     let mut values = value.split(',').collect::<Vec<_>>();
@@ -111,7 +139,7 @@ impl Settings {
                     }
                 }
                 "font" => {
-                    if !["Segoe UI", "Arial", "Consolas"].contains(&value) {
+                    if value.is_empty() || value.encode_utf16().count() > 31 || value.chars().any(char::is_control) {
                         return Err("Unsupported meter font".into());
                     }
                     s.font = value.into();
@@ -132,7 +160,7 @@ impl Settings {
     }
     pub fn serialize(&self) -> String {
         format!(
-            "adapter={}\ngpu={}\ninterval={}\nbits={}\ntheme={}\nvisible={}\norder={}\nstartup={}\ndisplay={}\nwidth={}\nposition={}\nlocked={}\noffset={}\nfont={}\ntransparent={}\npalette={}\n",
+            "adapter={}\ngpu={}\ninterval={}\nbits={}\ntheme={}\nvisible={}\nlabels={}\ncharts={}\nram_format={}\norder={}\nstartup={}\ndisplay={}\nwidth={}\nposition={}\nlocked={}\noffset={}\nfont={}\ntransparent={}\npalette={}\n",
             self.adapter,
             self.gpu,
             self.interval,
@@ -142,6 +170,9 @@ impl Settings {
                 .iter()
                 .map(|v| if *v { '1' } else { '0' })
                 .collect::<String>(),
+            self.labels.iter().map(|v| if *v { '1' } else { '0' }).collect::<String>(),
+            self.charts.iter().map(|v| if *v { '1' } else { '0' }).collect::<String>(),
+            self.ram_format,
             self.order,
             self.startup,
             self.display,
@@ -191,6 +222,27 @@ pub fn save(settings: &Settings) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn installed_font_names_are_preserved() {
+        let settings = Settings::parse("font=Arial Narrow\n").unwrap();
+        assert_eq!(Settings::parse(&settings.serialize()).unwrap().font, "Arial Narrow");
+        assert!(Settings::parse("font=\n").is_err());
+    }
+    #[test]
+    fn chart_selection_survives_restart() {
+        let settings = Settings::parse("charts=10101\n").unwrap();
+        assert_eq!(settings.charts, [true, false, true, false, true]);
+        assert_eq!(Settings::parse(&settings.serialize()).unwrap().charts, settings.charts);
+        assert!(Settings::parse("charts=10102\n").is_err());
+    }
+    #[test]
+    fn meter_formats_round_trip_and_reject_invalid_values() {
+        let parsed = Settings::parse("labels=10101\nram_format=2\n").unwrap();
+        assert_eq!(parsed.labels, [true, false, true, false, true]);
+        assert_eq!(Settings::parse(&parsed.serialize()).unwrap().ram_format, 2);
+        assert!(Settings::parse("labels=1010\n").is_err());
+        assert!(Settings::parse("ram_format=3\n").is_err());
+    }
+    #[test]
     fn preferences_round_trip() {
         let original = Settings {
             adapter: 42,
@@ -199,6 +251,9 @@ mod tests {
             bits: true,
             theme: 2,
             visible: [true, false, true, true, true],
+            labels: [true; 5],
+            charts: [false; 5],
+            ram_format: 0,
             order: "CPU,GPU,RAM,Download,Upload".into(),
             startup: false,
             display: String::new(),

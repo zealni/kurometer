@@ -2,6 +2,11 @@
 
 ## Exercised
 
+- The installed running executable reports FileDescription and ProductName `Kurmon` through Windows file-version metadata. The Task Manager window was not readable through the desktop capture during verification, so its displayed search result remains unverified.
+
+- With a temporary preferences directory, observed all five history charts in the details panel and CPU/GPU/RAM/download/upload values with small charts on the transparent taskbar meter; RAM showed both percentage and used GiB. The Windows font selector exposed installed families including Arial Narrow and Cascadia Code. Saving a changed CPU chart checkbox persisted `charts=01111`.
+- Red meter text contrast: #FF6B6B on #202020 is 5.87:1 and #C42B1C on #F5F5F5 is 5.19:1, both passing WCAG AA normal text.
+
 - Packaged the current release executable with `install.ps1`, README and logo. Extracted the ZIP into a temporary profile and exercised install, upgrade with preferences retained, uninstall with preferences retained, and uninstall with `-RemoveSettings`. Registry removal was mocked to avoid modifying the real account.
 - The packaged executable's `--sample` command returned live CPU, RAM, GPU and network samples; `cargo test --bin taskbar-system-monitor` passed 20 tests.
 
@@ -41,6 +46,7 @@ The application must not be described as PRD-complete. Outstanding implementatio
 
 - Secondary monitor is intentionally unsupported; meter always targets the primary taskbar. Mixed-DPI and multi-monitor behavior are not qualified.
 - The independent overlay fallback can still blink when taskbar activation changes window stacking order. Hosted mode was not exercised with a pinned-app jump list open, only with Explorer's taskbar menu and the Start menu.
+- On this desktop, both the installed build and the updated temporary build had an invisible hosted meter with transparent background disabled; transparent mode rendered the meter. The cause has not been isolated.
 - Full-screen handling is implemented but not exercised; screen-lock lifecycle remains unqualified.
  - Accessible focus-based reading announcements, high-contrast and 200% DPI verification; detail panel remains a classic text layout.
 - Explicit per-metric stale age semantics and stalled-worker recovery checks.
