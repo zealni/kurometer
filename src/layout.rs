@@ -1,22 +1,55 @@
-pub fn columns(width: i32) -> usize {
-    if width >= 480 {
-        5
-    } else if width < 320 {
-        2
-    } else {
-        3
-    }
+pub struct MeterLayout {
+    pub cells: [(i32, i32, i32, i32); 5],
+    pub font_px: i32,
 }
-pub fn row_widths(width: i32, metrics: &[usize]) -> [i32; 5] {
-    let mut widths = [0; 5];
-    for (slot, metric) in metrics.iter().enumerate() {
-        widths[slot] = if *metric < 3 { 88 } else { 120 };
+
+pub fn responsive_meter(width: i32, height: i32, dpi: u32, metrics: &[usize], ram_both: bool) -> MeterLayout {
+    let mut layout = MeterLayout { cells: [(0, 0, 0, 0); 5], font_px: 0 };
+    if width <= 0 || height <= 0 || metrics.is_empty() || metrics.len() > 5 {
+        return layout;
     }
-    if widths.iter().sum::<i32>() > width - 16 {
-        widths[..metrics.len()].fill((width - 16) / 5);
+
+    let dpi = if dpi == 0 { 96 } else { dpi.min(768) } as i64;
+    let scale = |value: i64| (value * dpi / 96).max(1) as i32;
+    let inset_x = scale(8).min((width - 1) / 2);
+    let inset_y = scale(2).min((height - 1) / 2);
+    let available_width = width - inset_x * 2;
+    let available_height = height - inset_y * 2;
+    let count = metrics.len();
+    let mut best_columns = 0;
+    let mut best_font = 0;
+    for columns in 1..=count {
+        let rows = (count + columns - 1) / columns;
+        let cell_width = available_width / columns as i32;
+        let cell_height = available_height / rows as i32;
+        if cell_width == 0 || cell_height == 0 || (rows > 1 && cell_height < scale(12)) {
+            continue;
+        }
+        let mut font = scale(16).min(cell_height);
+        for &metric in metrics {
+            let preferred = if metric == 2 && ram_both { 150 } else if metric < 3 { 88 } else { 120 };
+            font = font.min((i64::from(cell_width) * 16 / preferred) as i32);
+        }
+        if font >= best_font && font > 0 {
+            best_font = font;
+            best_columns = columns;
+        }
     }
-    widths
+    if best_columns == 0 {
+        return layout;
+    }
+    let rows = (count + best_columns - 1) / best_columns;
+    for slot in 0..count {
+        let column = slot % best_columns;
+        let row = slot / best_columns;
+        let x = |part: usize| inset_x + (i64::from(available_width) * part as i64 / best_columns as i64) as i32;
+        let y = |part: usize| inset_y + (i64::from(available_height) * part as i64 / rows as i64) as i32;
+        layout.cells[slot] = (x(column), y(row), x(column + 1), y(row + 1));
+    }
+    layout.font_px = best_font;
+    layout
 }
+
 pub fn intersects_taskbar(rect: (i32, i32, i32, i32), bar: (i32, i32, i32, i32)) -> bool {
     rect.0 < rect.2 && rect.1 < rect.3
         && rect.0 < bar.2 && rect.2 > bar.0
@@ -86,6 +119,67 @@ pub fn meter_position(
 mod tests {
     use super::*;
     #[test]
+    fn responsive_cells_fit_at_common_scales_and_taskbar_sizes() {
+        let metrics = [0, 1, 2, 3, 4];
+        for dpi in [96, 120, 144, 192] {
+            for height in [24, 40, 48, 72] {
+                for width in [260, 340, 480, 800, 1200] {
+                    for count in 1..=5 {
+                        for ram_both in [false, true] {
+                            let layout = responsive_meter(width, height, dpi, &metrics[..count], ram_both);
+                            assert!(layout.font_px > 0);
+                            for (slot, &(left, top, right, bottom)) in layout.cells[..count].iter().enumerate() {
+                                assert!(0 <= left && left < right && right <= width);
+                                assert!(0 <= top && top < bottom && bottom <= height);
+                                assert!(layout.font_px <= bottom - top);
+                                for &(l, t, r, b) in &layout.cells[..slot] {
+                                    assert!(right <= l || r <= left || bottom <= t || b <= top);
+                                }
+                            }
+                            assert!(layout.cells[count..].iter().all(|cell| *cell == (0, 0, 0, 0)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn every_metric_combination_stays_inside_taskbar() {
+        for mask in 1..32 {
+            let metrics: Vec<_> = (0..5).filter(|i| mask & (1 << i) != 0).collect();
+            for (width, height, dpi) in [(260, 24, 96), (571, 44, 120), (900, 72, 192)] {
+                let layout = responsive_meter(width, height, dpi, &metrics, true);
+                for &(left, top, right, bottom) in &layout.cells[..metrics.len()] {
+                    assert!(left >= 0 && top >= 0 && right <= width && bottom <= height);
+                    assert!(left < right && top < bottom);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn responsive_layout_uses_height_and_width_to_choose_rows() {
+        let metrics = [0, 1, 2, 3, 4];
+        let short = responsive_meter(260, 24, 96, &metrics, false);
+        let tall = responsive_meter(260, 72, 96, &metrics, false);
+        let wide = responsive_meter(1200, 72, 96, &metrics, false);
+        assert!(short.cells.iter().all(|cell| cell.1 == short.cells[0].1));
+        assert!(tall.cells.iter().any(|cell| cell.1 > tall.cells[0].1));
+        assert!(wide.cells.iter().all(|cell| cell.1 == wide.cells[0].1));
+    }
+
+    #[test]
+    fn responsive_layout_rejects_unusable_dimensions() {
+        for (width, height) in [(0, 40), (260, 0), (-1, 40), (260, -1), (1, 1)] {
+            let layout = responsive_meter(width, height, 96, &[0, 1, 2, 3, 4], true);
+            assert_eq!(layout.font_px, 0);
+            assert_eq!(layout.cells, [(0, 0, 0, 0); 5]);
+        }
+        let empty = responsive_meter(260, 40, 96, &[], false);
+        assert_eq!(empty.font_px, 0);
+        assert_eq!(empty.cells, [(0, 0, 0, 0); 5]);
+    }
+    #[test]
     fn child_placement_uses_screen_coordinates_on_negative_origin_display() {
         assert_eq!(meter_position((-1920, 1032, 0, 1080), 500, 0, -1, &[]), Some((-1912, 1034, 44)));
         assert_eq!(meter_position((-1920, 1032, 0, 1080), 500, 3, 100, &[]), Some((-1820, 1034, 44)));
@@ -110,22 +204,10 @@ mod tests {
         assert!(intersects_taskbar((700, 1036, 740, 1076), bar));
     }
     #[test]
-    fn wide_single_row_keeps_metrics_compact() {
-        assert_eq!(row_widths(800, &[0, 1, 2, 3, 4]), [88, 88, 88, 120, 120]);
-        assert_eq!(row_widths(480, &[0, 1, 2, 3, 4]), [92; 5]);
-        assert_eq!(row_widths(800, &[3, 0]), [120, 88, 0, 0, 0]);
-    }
-    #[test]
     fn details_follow_meter_and_stay_on_screen() {
         assert_eq!(popup_position((10, 1034, 350, 1078), (450, 370), (0, 0, 1920, 1080)), (10, 656));
         assert_eq!(popup_position((1850, 1034, 1920, 1078), (450, 370), (0, 0, 1920, 1080)), (1470, 656));
         assert_eq!(popup_position((-1800, 0, -1500, 44), (450, 370), (-1920, 0, 0, 1080)), (-1800, 52));
-    }
-    #[test]
-    fn width_changes_grid_density() {
-        assert_eq!(columns(260), 2);
-        assert_eq!(columns(340), 3);
-        assert_eq!(columns(480), 5);
     }
     #[test]
     fn meter_is_clamped_inside_actual_taskbar() {

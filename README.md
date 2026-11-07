@@ -23,11 +23,11 @@ When the background is transparent, click a visible character; transparent pixel
 
 Settings include the network and GPU adapters, refresh interval, bits or bytes, theme, font, transparent background, color palette, meter width and positioning, position lock, visible readings and their order, and optional sign-in startup. In the fallback overlay mode, positioning unlocked allows moving the meter and dragging its right edge to resize it; while hosted by the taskbar those gestures are unavailable, so use Settings.
 
-Choose which metrics, labels, and history charts appear individually. RAM can show percentage, used GiB, or both. CPU, GPU, and RAM readings turn red at 95% or above. The font selector lists installed Windows fonts; existing font preferences remain unchanged.
+Choose which metrics, labels, and history charts appear individually. RAM can show percentage, used GiB, or both (for example, `72% · 11.4 GiB`). CPU, GPU, and RAM readings turn red at 95% or above. The font selector lists installed Windows fonts; existing font preferences remain unchanged. Settings uses two columns when the screen is wide enough and scrolls on smaller displays.
 
 Enabled charts appear beside taskbar readings and in the details panel. History retains the latest 60 samples in memory, at the selected refresh interval, and resets when Kurmon exits. Network charts scale to the maximum observed rate; they do not represent network capacity.
 
-In the single-row layout, readings stay grouped instead of spreading across the full width as the meter is widened.
+Meter cells and text adapt to the available taskbar height, width, enabled metrics, and display scale. Width and custom offset are stored as 96-DPI logical pixels; existing values saved by older versions at a different scale are not migrated because their original DPI is unknown. Automatic placement shrinks the meter to an available gap; if the layout cannot fit safely, the meter hides rather than covering taskbar controls.
 
 ## Installation
 
@@ -49,7 +49,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\TaskbarSystemMonitor\install.ps1" -Uninstall -RemoveSettings
 ```
 
-Preferences remain at `%LOCALAPPDATA%\TaskbarSystemMonitor\settings.ini` unless removed explicitly. The executable, installation directory, settings directory, and startup registry value keep their existing identities.
+Preferences remain at `%LOCALAPPDATA%\TaskbarSystemMonitor\settings.ini` unless removed explicitly. Uninstall removes only the installed executable and installer; `-RemoveSettings` also removes Kurmon's `settings.ini` and `settings.tmp`. Other files and non-empty directories are preserved. The executable, installation directory, settings directory, and startup registry value keep their existing identities.
 
 ## Placement and limitations
 

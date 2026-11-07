@@ -2,6 +2,10 @@
 
 ## Exercised
 
+- The revised uninstaller was exercised with isolated `LOCALAPPDATA`/`APPDATA` and mocked registry removal: unrelated files and subdirectories survived `-RemoveSettings`; owned files and empty directories were removed; without the flag, preferences remained.
+- In an isolated preferences profile on the primary taskbar, the updated build rendered its opaque meter, RAM percentage and used GiB with a separator, and history lines. Switching to transparent mode through Settings remained visible and saved correctly. The compact two-column Settings dialog and taskbar context-menu interaction were inspected on the live desktop.
+- Scan-generation and startup transaction rollback branches passed unit tests; actual registry failure injection was not performed on the user's account.
+
 - The installed running executable reports FileDescription and ProductName `Kurmon` through Windows file-version metadata. The Task Manager window was not readable through the desktop capture during verification, so its displayed search result remains unverified.
 
 - With a temporary preferences directory, observed all five history charts in the details panel and CPU/GPU/RAM/download/upload values with small charts on the transparent taskbar meter; RAM showed both percentage and used GiB. The Windows font selector exposed installed families including Arial Narrow and Cascadia Code. Saving a changed CPU chart checkbox persisted `charts=01111`.
@@ -46,7 +50,7 @@ The application must not be described as PRD-complete. Outstanding implementatio
 
 - Secondary monitor is intentionally unsupported; meter always targets the primary taskbar. Mixed-DPI and multi-monitor behavior are not qualified.
 - The independent overlay fallback can still blink when taskbar activation changes window stacking order. Hosted mode was not exercised with a pinned-app jump list open, only with Explorer's taskbar menu and the Start menu.
-- On this desktop, both the installed build and the updated temporary build had an invisible hosted meter with transparent background disabled; transparent mode rendered the meter. The cause has not been isolated.
+- Previous builds had an invisible hosted meter with transparent background disabled. The revised opaque layered mode rendered on this desktop; other Windows configurations remain unqualified.
 - Full-screen handling is implemented but not exercised; screen-lock lifecycle remains unqualified.
  - Accessible focus-based reading announcements, high-contrast and 200% DPI verification; detail panel remains a classic text layout.
 - Explicit per-metric stale age semantics and stalled-worker recovery checks.

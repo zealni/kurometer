@@ -10,48 +10,71 @@ use windows::Win32::{Foundation::HWND, System::Com::*, UI::Accessibility::*};
 
 #[derive(Clone)]
 pub struct Layout {
-    pub bar: usize,
     pub occupied: Vec<(i32, i32)>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Request {
+    pub bar: usize,
+    pub generation: u64,
+    pub bounds: (i32, i32, i32, i32),
+}
+
+pub struct ScanResult {
+    pub request: Request,
+    pub occupied: Option<Vec<(i32, i32)>>,
+}
+
+impl ScanResult {
+    pub fn layout(self, generation: u64, bar: usize, bounds: (i32, i32, i32, i32)) -> Option<Layout> {
+        if self.request != (Request { bar, generation, bounds }) {
+            return None;
+        }
+        self.occupied.map(|occupied| Layout { occupied })
+    }
+}
+
 pub struct Scanner {
-    request: SyncSender<usize>,
-    results: Receiver<Layout>,
+    request: SyncSender<Request>,
+    results: Receiver<ScanResult>,
 }
 
 impl Scanner {
     pub fn new() -> Self {
-        let (request, requests) = mpsc::sync_channel::<usize>(1);
-        let (results_tx, results) = mpsc::sync_channel::<Layout>(1);
+        let (request, requests) = mpsc::sync_channel::<Request>(1);
+        let (results_tx, results) = mpsc::channel::<ScanResult>();
         thread::spawn(move || {
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            }
-            while let Ok(bar) = requests.recv() {
-                if let Some(layout) = scan(bar as *mut c_void) {
-                    let _ = results_tx.try_send(layout);
+            let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
+            while let Ok(request) = requests.recv() {
+                let occupied = if initialized { scan(request) } else { None };
+                if results_tx.send(ScanResult { request, occupied }).is_err() {
+                    break;
                 }
+            }
+            if initialized {
+                unsafe { CoUninitialize() };
             }
         });
         Self { request, results }
     }
-    pub fn request(&self, bar: *mut c_void) {
-        // A queued scan for another taskbar is re-requested by the next placement.
-        let _ = self.request.try_send(bar as usize);
+    pub fn request(&self, request: Request) -> bool {
+        self.request.try_send(request).is_ok()
     }
-    pub fn latest(&self) -> Option<Layout> {
-        let mut latest = None;
-        while let Ok(value) = self.results.try_recv() {
-            latest = Some(value);
-        }
-        latest
+    pub fn latest(&self) -> Option<ScanResult> {
+        self.results.try_recv().ok()
     }
 }
 
-fn scan(bar: *mut c_void) -> Option<Layout> {
-    if bar.is_null() {
+fn scan(request: Request) -> Option<Vec<(i32, i32)>> {
+    let bar = request.bar as *mut c_void;
+    if bar.is_null() || bar_bounds(bar)? != request.bounds {
         return None;
     }
+    let occupied = collect(bar, request.bounds).ok()?;
+    (bar_bounds(bar)? == request.bounds).then_some(occupied)
+}
+
+fn bar_bounds(bar: *mut c_void) -> Option<(i32, i32, i32, i32)> {
     let mut rect = displays::Rect::default();
     unsafe {
         #[link(name = "user32")]
@@ -62,12 +85,7 @@ fn scan(bar: *mut c_void) -> Option<Layout> {
             return None;
         }
     }
-    let bounds = (rect.left, rect.top, rect.right, rect.bottom);
-    let occupied = collect(bar, bounds).ok()?;
-    Some(Layout {
-        bar: bar as usize,
-        occupied,
-    })
+    Some((rect.left, rect.top, rect.right, rect.bottom))
 }
 
 fn collect(
@@ -92,5 +110,22 @@ fn collect(
             }
         }
         Ok(occupied)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn obsolete_and_failed_scans_do_not_supply_geometry() {
+        let request = Request { bar: 7, generation: 3, bounds: (0, 0, 1000, 40) };
+        let result = || ScanResult { request, occupied: Some(vec![(10, 20)]) };
+        assert!(result().layout(4, 7, request.bounds).is_none());
+        assert!(result().layout(3, 8, request.bounds).is_none());
+        assert!(result().layout(3, 7, (0, 0, 900, 40)).is_none());
+        assert_eq!(result().layout(3, 7, request.bounds).unwrap().occupied, vec![(10, 20)]);
+        let failed = ScanResult { request, occupied: None };
+        assert!(failed.layout(3, 7, request.bounds).is_none());
     }
 }

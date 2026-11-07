@@ -8,9 +8,25 @@ if ($Uninstall) {
     $running = Get-Process 'taskbar-system-monitor' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }
     if ($running) { throw 'Exit Kurmon from its tray menu before uninstalling.' }
     Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name TaskbarSystemMonitor -ErrorAction SilentlyContinue
-    if (Test-Path $destination) { Remove-Item $destination -Recurse -Force }
+    if (Test-Path $destination -PathType Container) {
+        foreach ($path in @($exe, (Join-Path $destination 'install.ps1'))) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path -Force }
+        }
+        if (!(Get-ChildItem -LiteralPath $destination -Force)) { [System.IO.Directory]::Delete($destination) }
+    }
     if ((Test-Path $shortcutPath) -and $shell.CreateShortcut($shortcutPath).TargetPath -eq $exe) { Remove-Item $shortcutPath }
-    if ($RemoveSettings) { Remove-Item (Join-Path $env:LOCALAPPDATA 'TaskbarSystemMonitor') -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($RemoveSettings) {
+        $settingsDir = Join-Path $env:LOCALAPPDATA 'TaskbarSystemMonitor'
+        if (Test-Path $settingsDir -PathType Container) {
+            foreach ($name in @('settings.ini', 'settings.tmp')) {
+                $path = Join-Path $settingsDir $name
+                if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path -Force }
+            }
+            if (!(Get-ChildItem -LiteralPath $settingsDir -Force)) {
+                [System.IO.Directory]::Delete($settingsDir)
+            }
+        }
+    }
     Write-Output 'Uninstalled. Settings retained unless -RemoveSettings was specified.'
     exit
 }
