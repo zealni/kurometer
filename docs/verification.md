@@ -48,7 +48,8 @@
 
 The application must not be described as PRD-complete. Outstanding implementation/qualification includes:
 
-- Secondary monitor is intentionally unsupported; meter always targets the primary taskbar. Mixed-DPI and multi-monitor behavior are not qualified.
+- Display selection supports Primary, All, and named taskbar-backed monitors; each meter has independent geometry and retries, and scan results are matched to their taskbar request. This desktop exposes two active monitors but only one Explorer taskbar, so a second meter, mixed-DPI behavior, Explorer taskbar recreation, and hotplug reconciliation could not be verified live. Settings popup bounds/scrolling and minimize/restore continuity are implemented; interactive checks were blocked because taskbar input was refused while the installed instance remained active.
+- Taskbar activation investigation: worktree builds ran temporarily with a copy of the user's settings. Six screenshots after minimizing Brave and twelve after a taskbar click showed meter text, sampled roughly 100 ms apart. Brave was then restored through the taskbar's accessibility invoke action; the restore transition itself was not captured. A newer build with the same overlay-recreation policy was visible at startup and the installed build was restarted without changing settings. Flicker shorter than the sampling interval and a full restore cycle remain unverified.
 - The independent overlay fallback can still blink when taskbar activation changes window stacking order. Hosted mode was not exercised with a pinned-app jump list open, only with Explorer's taskbar menu and the Start menu.
 - Previous builds had an invisible hosted meter with transparent background disabled. The revised opaque layered mode rendered on this desktop; other Windows configurations remain unqualified.
 - Full-screen handling is implemented but not exercised; screen-lock lifecycle remains unqualified.
