@@ -50,10 +50,37 @@ pub fn responsive_meter(width: i32, height: i32, dpi: u32, metrics: &[usize], ra
     layout
 }
 
+pub const PRIMARY_DISPLAY: &str = "__primary__";
+pub const ALL_DISPLAYS: &str = "__all__";
+pub fn display_targets(choice: &str, displays: &[(&str, bool)]) -> Vec<usize> {
+    if choice == ALL_DISPLAYS {
+        return (0..displays.len()).collect();
+    }
+    displays.iter().position(|(id, primary)| {
+        if choice.is_empty() || choice == PRIMARY_DISPLAY { *primary } else { *id == choice }
+    }).or_else(|| displays.iter().position(|(_, primary)| *primary)).into_iter().collect()
+}
+pub fn settings_bounds(
+    meter: (i32, i32, i32, i32),
+    size: (i32, i32),
+    work: (i32, i32, i32, i32),
+) -> (i32, i32, i32, i32) {
+    let (left, top, right, bottom) = work;
+    let width = size.0.clamp(1, (right - left).max(1));
+    let height = size.1.clamp(1, (bottom - top).max(1));
+    let x = meter.0.clamp(left, (right - width).max(left));
+    (x, (bottom - height).max(top), width, height)
+}
+pub fn keep_meter_visible_during_refresh(_hosted: bool, taskbar_alive: bool, last_position_safe: bool) -> bool {
+    taskbar_alive && last_position_safe
+}
 pub fn intersects_taskbar(rect: (i32, i32, i32, i32), bar: (i32, i32, i32, i32)) -> bool {
     rect.0 < rect.2 && rect.1 < rect.3
         && rect.0 < bar.2 && rect.2 > bar.0
         && rect.1 < bar.3 && rect.3 > bar.1
+}
+pub fn taskbar_bounds_match(previous: Option<(i32, i32, i32, i32)>, current: (i32, i32, i32, i32)) -> bool {
+    previous == Some(current)
 }
 pub fn inset_bounds(bounds: (i32, i32, i32, i32), inset: i32) -> (i32, i32, i32, i32) {
     let (l, t, r, b) = bounds;
@@ -85,8 +112,8 @@ pub fn popup_position(
 pub fn relevant_shell_event(event: u32, target_is_taskbar: bool) -> bool {
     event == 3 || ((0x8000..=0x800c).contains(&event) && target_is_taskbar)
 }
-pub fn replace_meter(attached_parent: usize, current_parent: usize, meter_alive: bool) -> bool {
-    !meter_alive || attached_parent != current_parent
+pub fn recreate_meter(attached_parent: usize, current_parent: usize, meter_alive: bool, rejected_parent: usize) -> bool {
+    !meter_alive || (attached_parent != current_parent && rejected_parent != current_parent)
 }
 pub fn meter_position(
     bar: (i32, i32, i32, i32),
@@ -192,10 +219,17 @@ mod tests {
     }
     #[test]
     fn missing_or_replaced_parent_requires_recreating_meter_only() {
-        assert!(replace_meter(0, 42, false));
-        assert!(replace_meter(41, 42, true));
-        assert!(replace_meter(42, 42, false));
-        assert!(!replace_meter(42, 42, true));
+        assert!(recreate_meter(0, 42, false, 0));
+        assert!(recreate_meter(41, 42, true, 0));
+        assert!(recreate_meter(42, 42, false, 0));
+        assert!(!recreate_meter(42, 42, true, 0));
+    }
+    #[test]
+    fn refused_parent_keeps_overlay_until_retry_or_taskbar_change() {
+        assert!(!recreate_meter(0, 42, true, 42));
+        assert!(recreate_meter(0, 42, true, 0));
+        assert!(recreate_meter(0, 43, true, 42));
+        assert!(recreate_meter(0, 42, false, 42));
     }
     #[test]
     fn popup_buttons_do_not_count_as_taskbar_obstacles() {
@@ -229,5 +263,38 @@ mod tests {
         assert!(!relevant_shell_event(0x8002, false));
         assert!(relevant_shell_event(0x8002, true));
         assert!(relevant_shell_event(3, false));
+    }
+    #[test]
+    fn display_choices_resolve_primary_all_specific_and_stale_ids() {
+        let displays = [("DISPLAY1", true), ("DISPLAY2", false)];
+        assert_eq!(display_targets("", &displays), [0]);
+        assert_eq!(display_targets(PRIMARY_DISPLAY, &displays), [0]);
+        assert_eq!(display_targets(ALL_DISPLAYS, &displays), [0, 1]);
+        assert_eq!(display_targets("DISPLAY2", &displays), [1]);
+        assert_eq!(display_targets("removed", &displays), [0]);
+        assert!(display_targets(ALL_DISPLAYS, &[]).is_empty());
+    }
+    #[test]
+    fn settings_panel_sits_low_and_clamps_to_negative_origin_work_area() {
+        assert_eq!(settings_bounds((-1750, 12, -1300, 56), (520, 560), (-1920, 0, 0, 1020)), (-1750, 460, 520, 560));
+        assert_eq!(settings_bounds((1500, 20, 1800, 64), (520, 560), (0, 0, 1920, 550)), (1400, 0, 520, 550));
+    }
+    #[test]
+    fn all_displays_uses_only_taskbar_backed_entries() {
+        let taskbar_backed = [("DISPLAY5", true)];
+        assert_eq!(display_targets(ALL_DISPLAYS, &taskbar_backed), [0]);
+        assert!(display_targets(ALL_DISPLAYS, &[]).is_empty());
+    }
+    #[test]
+    fn taskbar_bounds_match_is_required_to_keep_last_position_safe() {
+        assert!(taskbar_bounds_match(Some((0, 1032, 1920, 1080)), (0, 1032, 1920, 1080)));
+        assert!(!taskbar_bounds_match(Some((0, 1032, 1920, 1080)), (0, 1030, 1920, 1080)));
+        assert!(!taskbar_bounds_match(None, (0, 1032, 1920, 1080)));
+    }
+    #[test]
+    fn visible_overlay_during_refresh_requires_live_matching_taskbar() {
+        assert!(keep_meter_visible_during_refresh(false, true, true));
+        assert!(!keep_meter_visible_during_refresh(false, true, false));
+        assert!(!keep_meter_visible_during_refresh(false, false, true));
     }
 }

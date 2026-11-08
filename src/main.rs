@@ -78,6 +78,7 @@ struct Notify {
 unsafe extern "system" {
     fn FindWindowW(class: *const u16, title: *const u16) -> H;
     fn IsChild(parent: H, child: H) -> i32;
+    fn IsWindow(hwnd: H) -> i32;
     fn GetWindowRect(hwnd: H, r: *mut Rect) -> i32;
     fn GetFocus() -> H;
     fn RegisterClassW(c: *const Class) -> u16;
@@ -438,6 +439,17 @@ unsafe extern "system" fn shell_changed(
         }
     }
 }
+struct Meter {
+    id: String,
+    hwnd: H,
+    parent: H,
+    geometry: Option<scan::Layout>,
+    generation: u64,
+    context: Option<(usize, (i32, i32, i32, i32), u32)>,
+    pending: Option<scan::Request>,
+    dpi: u32,
+    blocked: bool,
+}
 struct App {
     config: settings::Settings,
     worker: worker::Worker,
@@ -449,6 +461,7 @@ struct App {
     font: H,
     small: H,
     details: H,
+    details_owner: H,
     settings: H,
     controller: H,
     meter: H,
@@ -465,6 +478,7 @@ struct App {
     drag_start: Option<Rect>,
     visible: bool,
     blocked: bool,
+    extra_meters: Vec<Meter>,
     last: Instant,
     notice: String,
     hook: H,
@@ -748,7 +762,7 @@ fn fullscreen(screen: displays::Rect) -> bool {
             && r.bottom >= screen.bottom
     }
 }
-unsafe fn create_meter(a: &mut App, bar: H) -> H {
+unsafe fn create_meter(a: &mut App, bar: H, primary: bool) -> H {
     unsafe {
         let meter = CreateWindowExW(
             0x08000080,
@@ -774,32 +788,36 @@ unsafe fn create_meter(a: &mut App, bar: H) -> H {
         let style = GetWindowLongPtrW(meter, -16) as u32;
         SetWindowLongPtrW(meter, -16, ((style & !0x80000000) | 0x40000000) as isize);
         SetParent(meter, bar);
-        if GetParent(meter) == bar {
-            a.parent = bar;
-            a.retries = 0;
-            KillTimer(a.controller, 4);
-        } else {
-            // Builds that refuse cross-process parenting keep the plain overlay.
-            let style = GetWindowLongPtrW(meter, -16) as u32;
-            SetWindowLongPtrW(meter, -16, ((style & !0x40000000) | 0x80000000) as isize);
-            a.parent = null_mut();
-            a.rejected = bar;
-            a.retries = a.retries.saturating_add(1);
-            if a.retries <= 6 {
-                // Shell refusals are usually transient (busy taskbar thread).
-                SetTimer(a.controller, 4, 5000, null_mut());
+        if primary {
+            if GetParent(meter) == bar {
+                a.parent = bar;
+                a.retries = 0;
+                KillTimer(a.controller, 4);
+            } else {
+                let style = GetWindowLongPtrW(meter, -16) as u32;
+                SetWindowLongPtrW(meter, -16, ((style & !0x40000000) | 0x80000000) as isize);
+                a.parent = null_mut();
+                a.rejected = bar;
+                a.retries = a.retries.saturating_add(1);
+                if a.retries <= 6 { SetTimer(a.controller, 4, 5000, null_mut()); }
             }
         }
         meter
     }
 }
+fn keep_meter_during_scan(a: &App) -> bool {
+    let taskbar = if !a.parent.is_null() { a.parent } else { a.scan_context.map(|(bar, _, _)| bar as H).unwrap_or(null_mut()) };
+    let mut current = Rect::default();
+    let taskbar_alive = !taskbar.is_null() && unsafe { IsWindow(taskbar) != 0 && GetWindowRect(taskbar, &mut current) != 0 };
+    let previous = a.scan_context.map(|(_, bounds, _)| bounds);
+    let bounds_match = layout::taskbar_bounds_match(previous, (current.left, current.top, current.right, current.bottom));
+    layout::keep_meter_visible_during_refresh(!a.parent.is_null(), taskbar_alive, bounds_match)
+}
 fn invalidate_geometry(a: &mut App) {
     a.scan_generation = a.scan_generation.wrapping_add(1);
     a.geometry = None;
     a.scan_pending = None;
-    a.rejected = null_mut();
-    a.retries = 0;
-    if !a.meter.is_null() {
+    if !a.meter.is_null() && !keep_meter_during_scan(a) {
         unsafe { ShowWindow(a.meter, 0); }
     }
 }
@@ -809,11 +827,34 @@ fn ensure_scan_timer(a: &mut App) {
         a.scan_timer = unsafe { SetTimer(a.controller, 3, 200, null_mut()) != 0 };
     }
 }
+fn apply_scan_results(a: &mut App) {
+    let results: Vec<_> = std::iter::from_fn(|| a.scan.latest()).collect();
+    for result in results {
+        let request = result.request;
+        if a.scan_pending == Some(request) {
+            a.scan_pending = None;
+            a.geometry = result.layout(a.scan_generation, request.bar, request.bounds);
+        } else if let Some(meter) = a.extra_meters.iter_mut().find(|meter| meter.pending == Some(request)) {
+            meter.pending = None;
+            meter.geometry = result.layout(meter.generation, request.bar, request.bounds);
+        }
+    }
+}
 
 unsafe fn place(a: &mut App) {
     let _dpi_context = DpiContext::new(-4);
     unsafe {
-        if let Some(display) = displays::selected(&a.config.display) {
+        let displays: Vec<_> = displays::list().into_iter().filter(|display| !display.taskbar.is_null()).collect();
+        let targets = layout::display_targets(&a.config.display, &displays.iter().map(|d| (d.id.as_str(), d.primary)).collect::<Vec<_>>());
+        let primary_index = displays.iter().position(|d| d.primary);
+        if layout::ALL_DISPLAYS == a.config.display || primary_index.map(|index| !targets.contains(&index)).unwrap_or(true) {
+            if !a.meter.is_null() { ShowWindow(a.meter, 0); }
+            if !a.meter.is_null() { DestroyWindow(a.meter); a.meter = null_mut(); a.parent = null_mut(); }
+            a.blocked = false;
+            reconcile_extra_meters(a);
+            return;
+        }
+        if let Some(display) = primary_index.and_then(|index| displays.get(index)) {
             if !fullscreen(display.screen) {
                 let bar = display.taskbar;
                 let mut r = Rect::default();
@@ -836,15 +877,12 @@ unsafe fn place(a: &mut App) {
                     a.scan_context = Some((bar as usize, bounds, dpi));
                 }
                 let attached = GetParent(a.meter);
-                let refused = !a.meter.is_null() && a.rejected == bar && attached != bar;
-                if !refused
-                    && layout::replace_meter(attached as usize, bar as usize, !a.meter.is_null())
-                {
+                if layout::recreate_meter(attached as usize, bar as usize, !a.meter.is_null(), a.rejected as usize) {
                     if !a.meter.is_null() {
                         DestroyWindow(a.meter);
                         a.meter = null_mut();
                     }
-                    let created = create_meter(a, bar);
+                    let created = create_meter(a, bar, true);
                     a.meter = created;
                     if created.is_null() {
                         ensure_scan_timer(a);
@@ -852,19 +890,14 @@ unsafe fn place(a: &mut App) {
                     }
                 }
                 let meter = a.meter;
-                while let Some(result) = a.scan.latest() {
-                    if a.scan_pending == Some(result.request) {
-                        a.scan_pending = None;
-                        a.geometry = result.layout(a.scan_generation, bar as usize, bounds);
-                    }
-                }
+                apply_scan_results(a);
                 if a.geometry.is_none() {
                     let request = scan::Request { bar: bar as usize, generation: a.scan_generation, bounds };
                     if a.scan_pending.is_none() && a.scan.request(request) {
                         a.scan_pending = Some(request);
                     }
                     ensure_scan_timer(a);
-                    ShowWindow(meter, 0);
+                    if !keep_meter_during_scan(a) { ShowWindow(meter, 0); }
                     return;
                 }
                 let geometry = a.geometry.as_ref().unwrap();
@@ -943,14 +976,129 @@ unsafe fn place(a: &mut App) {
         KillTimer(a.controller, 3);
         a.scan_timer = false;
     }
+    unsafe { reconcile_extra_meters(a); }
 }
-fn position_details(a: &App, panel: H) {
+fn invalidate_extra_geometry(a: &mut App) {
+    for meter in &mut a.extra_meters {
+        meter.generation = meter.generation.wrapping_add(1);
+        meter.geometry = None;
+        meter.pending = None;
+        if unsafe { IsWindow(meter.parent) } == 0 {
+            unsafe { ShowWindow(meter.hwnd, 0); }
+        }
+    }
+}
+unsafe fn reconcile_extra_meters(a: &mut App) {
+    let displays: Vec<_> = displays::list().into_iter().filter(|display| !display.taskbar.is_null()).collect();
+    let identities: Vec<_> = displays.iter().map(|d| (d.id.as_str(), d.primary)).collect();
+    let targets = layout::display_targets(&a.config.display, &identities);
+    let desired: Vec<_> = targets.into_iter().filter_map(|i| displays.get(i))
+        .filter(|d| !d.taskbar.is_null() && (a.config.display == layout::ALL_DISPLAYS || !d.primary))
+        .cloned().collect();
+    let desired_ids: Vec<_> = desired.iter().map(|d| d.id.as_str()).collect();
+    for i in (0..a.extra_meters.len()).rev() {
+        if !desired_ids.contains(&a.extra_meters[i].id.as_str()) {
+            let meter = a.extra_meters.remove(i);
+            unsafe { DestroyWindow(meter.hwnd); }
+        }
+    }
+    apply_scan_results(a);
+    for display in desired {
+        if fullscreen(display.screen) {
+            unsafe { ShowWindow(a.extra_meters.iter().find(|meter| meter.id == display.id).map(|meter| meter.hwnd).unwrap_or(null_mut()), 0); }
+            continue;
+        }
+        let Some(dpi) = taskbar_dpi(display.taskbar) else { continue };
+        let mut bar_rect = Rect::default();
+        if unsafe { GetWindowRect(display.taskbar, &mut bar_rect) } == 0 { continue; }
+        let bounds = (bar_rect.left, bar_rect.top, bar_rect.right, bar_rect.bottom);
+        if let Some(index) = a.extra_meters.iter().position(|m| m.id == display.id && (m.parent != display.taskbar || unsafe { IsWindow(m.hwnd) } == 0)) {
+            let stale = a.extra_meters.remove(index);
+            unsafe { DestroyWindow(stale.hwnd); }
+        }
+        let index = if let Some(i) = a.extra_meters.iter().position(|m| m.id == display.id) { i } else {
+            let hwnd = unsafe { create_meter(a, display.taskbar, false) };
+            if hwnd.is_null() || unsafe { GetParent(hwnd) != display.taskbar } {
+                if !hwnd.is_null() { unsafe { DestroyWindow(hwnd); } }
+                continue;
+            }
+            a.extra_meters.push(Meter { id: display.id.clone(), hwnd, parent: display.taskbar, geometry: None, generation: 0, context: None, pending: None, dpi, blocked: false });
+            a.extra_meters.len() - 1
+        };
+        let meter = &mut a.extra_meters[index];
+        if meter.context != Some((display.taskbar as usize, bounds, dpi)) {
+            meter.generation = meter.generation.wrapping_add(1);
+            meter.geometry = None;
+            meter.pending = None;
+            meter.context = Some((display.taskbar as usize, bounds, dpi));
+        }
+        let Some(geometry) = meter.geometry.as_ref() else {
+            let request = scan::Request { bar: display.taskbar as usize, generation: meter.generation, bounds };
+            if meter.pending.is_none() && a.scan.request(request) { meter.pending = Some(request); }
+            ensure_scan_timer(a);
+            continue;
+        };
+        let mut width = scale_pixels(a.config.width, dpi, 96);
+        let offset = if a.config.offset < 0 { -1 } else { scale_pixels(a.config.offset, dpi, 96) };
+        if a.config.position == -1 {
+            let mut low = 0;
+            let mut high = width;
+            while low < high {
+                let candidate = low + (high - low + 1) / 2;
+                if layout::meter_position(bounds, candidate, -1, offset, &geometry.occupied).is_some() { low = candidate; } else { high = candidate - 1; }
+            }
+            width = low;
+        }
+        let Some((x, y, height)) = layout::meter_position(bounds, width, a.config.position, offset, &geometry.occupied) else {
+            meter.blocked = true;
+            unsafe { ShowWindow(meter.hwnd, 0); }
+            continue;
+        };
+        let selected: Vec<_> = a.config.order.split(',').filter_map(|name| ["CPU", "GPU", "RAM", "Download", "Upload"].iter().position(|v| *v == name)).filter(|i| a.config.visible[*i]).collect();
+        if layout::responsive_meter(width, height, dpi, &selected, a.config.ram_format == 2).font_px < scale_pixels(8, dpi, 96) {
+            meter.blocked = true;
+            unsafe { ShowWindow(meter.hwnd, 0); }
+            continue;
+        }
+        let (x, y) = if unsafe { GetParent(meter.hwnd) == display.taskbar } {
+            let mut point = [x, y];
+            unsafe { ScreenToClient(display.taskbar, &mut point); }
+            (point[0], point[1])
+        } else { (x, y) };
+        unsafe {
+            if SetWindowPos(meter.hwnd, null_mut(), x, y, width, height, 0x10) == 0 {
+                meter.blocked = true;
+                ShowWindow(meter.hwnd, 0);
+                continue;
+            }
+        }
+        let mut actual = Rect::default();
+        let mut client = Rect::default();
+        if unsafe { GetParent(meter.hwnd) != display.taskbar }
+            || unsafe { GetWindowRect(meter.hwnd, &mut actual) == 0 || GetClientRect(meter.hwnd, &mut client) == 0 }
+            || actual.left < bounds.0 || actual.top < bounds.1 || actual.right > bounds.2 || actual.bottom > bounds.3
+            || geometry.occupied.iter().any(|&(left, right)| actual.left < right && actual.right > left)
+            || client.right <= 0 || client.bottom <= 0 {
+            meter.blocked = true;
+            unsafe { ShowWindow(meter.hwnd, 0); }
+            continue;
+        }
+        unsafe {
+            InvalidateRect(meter.hwnd, std::ptr::null(), 0);
+            ShowWindow(meter.hwnd, if a.visible { 4 } else { 0 });
+        }
+        meter.dpi = dpi;
+        meter.blocked = false;
+    }
+}
+fn position_details(a: &App, panel: H, owner: H) {
     let _dpi_context = DpiContext::new(-1);
     unsafe {
-        if let Some(display) = displays::selected(&a.config.display) {
+        let owner_id = if owner == a.meter { String::new() } else { a.extra_meters.iter().find(|m| m.hwnd == owner).map(|m| m.id.clone()).unwrap_or_default() };
+        if let Some(display) = displays::selected(&owner_id) {
             let mut meter = Rect::default();
             let mut rect = Rect::default();
-            if GetWindowRect(a.meter, &mut meter) != 0 && GetWindowRect(panel, &mut rect) != 0 {
+            if GetWindowRect(owner, &mut meter) != 0 && GetWindowRect(panel, &mut rect) != 0 {
                 let mut work = Rect::default();
                 if SystemParametersInfoW(0x30, 0, (&mut work as *mut Rect).cast(), 0) == 0 {
                     work = Rect { left: display.screen.left, top: display.screen.top, right: display.screen.right, bottom: display.screen.bottom };
@@ -995,6 +1143,7 @@ fn show_menu(hwnd: H) {
             3 => {
                 app(hwnd).visible = !app(hwnd).visible;
                 place(app(hwnd));
+                reconcile_extra_meters(app(hwnd));
             }
             4 => { DestroyWindow(hwnd); }
             _ => {}
@@ -1005,8 +1154,9 @@ fn details(hwnd: H) {
     let _dpi_context = DpiContext::new(-1);
     unsafe {
         let a = app(hwnd);
+        a.details_owner = hwnd;
         if !a.details.is_null() {
-            position_details(a, a.details);
+            position_details(a, a.details, a.details_owner);
             ShowWindow(a.details, 5);
             SetForegroundWindow(a.details);
             return;
@@ -1051,7 +1201,7 @@ fn details(hwnd: H) {
             32,
             0x10000 | 0xb,
         );
-        position_details(a, h);
+        position_details(a, h, a.details_owner);
         ShowWindow(h, 5);
         SetForegroundWindow(h);
     }
@@ -1069,19 +1219,21 @@ fn open_settings(hwnd: H) {
             work.right = GetSystemMetrics(0);
             work.bottom = GetSystemMetrics(1);
         }
-        let available_width = (work.right - work.left).max(1);
-        let available_height = (work.bottom - work.top).max(1);
-        let width = if available_width >= 1000 { 1000 } else { 520.min(available_width) };
-        let height = 620.min(available_height);
+        let displays = displays::list();
+        let display = displays::selected(&a.config.display).or_else(|| displays.iter().find(|d| d.primary).cloned());
+        if let Some(display) = &display { work = Rect { left: display.work.left, top: display.work.top, right: display.work.right, bottom: display.work.bottom }; }
+        let mut meter = Rect::default();
+        if !a.meter.is_null() { GetWindowRect(a.meter, &mut meter); }
+        let (x, y, width, height) = layout::settings_bounds(
+            (meter.left, meter.top, meter.right, meter.bottom), (520, 560),
+            (work.left, work.top, work.right, work.bottom),
+        );
         let h = CreateWindowExW(
             0x80,
             wide("MonitorPanel").as_ptr(),
             wide("Kurmon Settings").as_ptr(),
             0x80f80000,
-            work.left + ((available_width - width) / 2).min(20),
-            work.top + ((available_height - height) / 2).min(20),
-            width,
-            height,
+            x, y, width, height,
             a.controller,
             null_mut(),
             GetModuleHandleW(std::ptr::null()),
@@ -1214,11 +1366,18 @@ fn open_settings(hwnd: H) {
             150,
             0x10000 | 3 | 0x200000,
         );
-        for (i, display) in displays::list().iter().enumerate() {
-            SendMessageW(selector, 0x143, 0, wide(&display.id).as_ptr() as isize);
-            if display.id == a.config.display || (a.config.display.is_empty() && i == 0) {
-                SendMessageW(selector, 0x14e, i, 0);
-            }
+        let displays: Vec<_> = displays::list().into_iter().filter(|display| !display.taskbar.is_null()).collect();
+        let primary = SendMessageW(selector, 0x143, 0, wide("Primary display").as_ptr() as isize);
+        let all = SendMessageW(selector, 0x143, 0, wide("All displays").as_ptr() as isize);
+        if a.config.display.is_empty() || a.config.display == layout::PRIMARY_DISPLAY {
+            SendMessageW(selector, 0x14e, primary as usize, 0);
+        } else if a.config.display == layout::ALL_DISPLAYS {
+            SendMessageW(selector, 0x14e, all as usize, 0);
+        }
+        for display in &displays {
+            let label = format!("{}{}", display.id, if display.primary { " (Primary)" } else { "" });
+            let item = SendMessageW(selector, 0x143, 0, wide(&label).as_ptr() as isize);
+            if display.id == a.config.display { SendMessageW(selector, 0x14e, item as usize, 0); }
         }
         control(h, "STATIC", "Meter font", 0, 24, 515, 90, 22, 0);
         let fonts = installed_fonts(h);
@@ -1436,12 +1595,13 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                 0
             }
             0x8003 => {
-                let a = app(hwnd);
-                place(a);
+                place(app(hwnd));
+                reconcile_extra_meters(app(hwnd));
                 0
             }
             0x8002 => {
                 invalidate_geometry(app(hwnd));
+                invalidate_extra_geometry(app(hwnd));
                 SetTimer(hwnd, 2, 200, null_mut());
                 0
             }
@@ -1449,10 +1609,17 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                 if wp == 2 {
                     KillTimer(hwnd, 2);
                     place(app(hwnd));
+                    reconcile_extra_meters(app(hwnd));
                     return 0;
                 }
                 if wp == 3 {
-                    place(app(hwnd));
+                    let a = app(hwnd);
+                    place(a);
+                    reconcile_extra_meters(a);
+                    if a.scan_pending.is_none() && a.extra_meters.iter().all(|meter| meter.geometry.is_some()) {
+                        KillTimer(hwnd, 3);
+                        a.scan_timer = false;
+                    }
                     return 0;
                 }
                 if wp == 4 {
@@ -1489,15 +1656,18 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     || rate(next.upload, a.config.bits) != rate(a.snapshot.upload, a.config.bits);
                 a.snapshot = next;
                 a.last = stamp;
-                if (changed || (new_sample && a.config.charts.iter().any(|&v| v))) && a.visible && !a.blocked && !a.meter.is_null() {
-                    InvalidateRect(a.meter, std::ptr::null(), 0);
+                if changed || (new_sample && a.config.charts.iter().any(|&v| v)) {
+                    if a.visible && !a.blocked && !a.meter.is_null() { InvalidateRect(a.meter, std::ptr::null(), 0); }
+                    for meter in &a.extra_meters {
+                        if a.visible && !meter.blocked && !meter.hwnd.is_null() { InvalidateRect(meter.hwnd, std::ptr::null(), 0); }
+                    }
                 }
                 if !a.details.is_null() {
                     InvalidateRect(a.details, std::ptr::null(), 0);
                 }
                 0
             }
-            0x205 if hwnd == app(hwnd).meter => {
+            0x205 if hwnd == app(hwnd).meter || app(hwnd).extra_meters.iter().any(|meter| meter.hwnd == hwnd) => {
                 show_menu(hwnd);
                 0
             }
@@ -1509,7 +1679,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                 }
                 0
             }
-            0x202 if hwnd == app(hwnd).meter || hwnd == app(hwnd).controller => {
+            0x202 if hwnd == app(hwnd).meter || hwnd == app(hwnd).controller || app(hwnd).extra_meters.iter().any(|meter| meter.hwnd == hwnd) => {
                 details(hwnd);
                 0
             }
@@ -1556,9 +1726,13 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         next.order = String::from_utf16_lossy(&order[..count as usize]);
                         next.startup = SendMessageW(get_child(hwnd, 107), 0xf0, 0, 0) == 1;
                         let index = SendMessageW(get_child(hwnd, 108), 0x147, 0, 0);
-                        if let Some(display) = displays::list().get(index as usize) {
-                            next.display = display.id.clone();
-                        }
+                        let displays: Vec<_> = displays::list().into_iter().filter(|display| !display.taskbar.is_null()).collect();
+                        next.display = match index {
+                            0 => layout::PRIMARY_DISPLAY.into(),
+                            1 => layout::ALL_DISPLAYS.into(),
+                            i if i >= 2 => displays.get((i - 2) as usize).map(|d| d.id.clone()).unwrap_or_else(|| layout::PRIMARY_DISPLAY.into()),
+                            _ => layout::PRIMARY_DISPLAY.into(),
+                        };
                         let position_index = SendMessageW(get_child(hwnd, 109), 0x147, 0, 0) as i32;
                         next.position = position_index - 1;
                         if next.position != 3 {
@@ -1602,12 +1776,17 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                                 }
                                 a.config = next;
                                 meter_transparency(a.meter, a.config.transparent, a.config.theme);
+                                for meter in &a.extra_meters {
+                                    meter_transparency(meter.hwnd, a.config.transparent, a.config.theme);
+                                    InvalidateRect(meter.hwnd, std::ptr::null(), 0);
+                                }
                                 a.worker.configure(a.config.clone());
                                 KillTimer(a.controller, 1);
                                 SetTimer(a.controller, 1, a.config.interval * 1000, null_mut());
                                 InvalidateRect(a.meter, std::ptr::null(), 0);
                                 invalidate_geometry(a);
                                 place(a);
+                                reconcile_extra_meters(a);
                                 DestroyWindow(hwnd);
                             }
                             Err(e) => {
@@ -1638,7 +1817,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                 SetBkMode(dc, 1);
                 SelectObject(dc, a.small);
                 let s = &a.snapshot;
-                if hwnd == a.meter {
+                if hwnd == a.meter || a.extra_meters.iter().any(|meter| meter.hwnd == hwnd) {
                     // Fixed slots stop digits from shifting the neighbouring readings.
                     let names = ["CPU", "GPU", "RAM", "Download", "Upload"];
                     let selected = a
@@ -1650,7 +1829,8 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         .collect::<Vec<_>>();
                     let mut client = Rect::default();
                     GetClientRect(hwnd, &mut client);
-                    let meter_layout = layout::responsive_meter(client.right, client.bottom, a.meter_dpi, &selected, a.config.ram_format == 2);
+                    let meter_dpi = a.extra_meters.iter().find(|meter| meter.hwnd == hwnd).map(|meter| meter.dpi).unwrap_or(a.meter_dpi);
+                    let meter_layout = layout::responsive_meter(client.right, client.bottom, meter_dpi, &selected, a.config.ram_format == 2);
                     let muted = if light { 0x5f5f5f } else { 0xa0a0a0 };
                     let accent = match (a.config.palette, light) {
                         (1, false) => rgb(0x6c, 0xcb, 0x8a),
@@ -1679,7 +1859,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         };
                         let prefix = if a.config.labels[i] { prefix } else { "" };
                         let full_text = wide(&format!("{prefix}{value}"));
-                        let chart_width = if a.config.charts[i] { scale_pixels(18, a.meter_dpi, 96).min((right - left) / 3) } else { 0 };
+                        let chart_width = if a.config.charts[i] { scale_pixels(18, meter_dpi, 96).min((right - left) / 3) } else { 0 };
                         let text_right = right - chart_width;
                         let available = (text_right - left).max(1);
                         let face = wide(&a.config.font);
@@ -1746,7 +1926,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         DrawTextW(dc, wide(&value).as_ptr(), -1, &mut cell, 0x824 | 0x8000);
                         if chart_width > 0 {
                             let chart_left = text_right + 1;
-                            let inset = scale_pixels(2, a.meter_dpi, 96);
+                            let inset = scale_pixels(2, meter_dpi, 96);
                             if right - chart_left >= 2 && bottom - top > inset * 2 {
                                 draw_history(dc, &a.history, i, Rect { left: chart_left, top: top + inset, right, bottom: bottom - inset }, accent);
                             }
@@ -1834,10 +2014,13 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         DestroyWindow(a.meter);
                         a.meter = null_mut();
                     }
+                    for meter in a.extra_meters.drain(..) { DestroyWindow(meter.hwnd); }
                     notify(hwnd, true);
                     PostQuitMessage(0);
                 } else if hwnd == a.meter {
                     a.meter = null_mut();
+                } else if let Some(index) = a.extra_meters.iter().position(|meter| meter.hwnd == hwnd) {
+                    a.extra_meters.remove(index);
                 } else if hwnd == a.details {
                     a.details = null_mut();
                 } else if hwnd == a.settings {
@@ -1867,22 +2050,30 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                 }
                 1
             }
+            0x7e => {
+                let a = app(hwnd);
+                invalidate_geometry(a);
+                invalidate_extra_geometry(a);
+                SetTimer(hwnd, 2, 200, null_mut());
+                0
+            }
             0x2e0 => {
                 let controller = app(hwnd).controller;
                 PostMessageW(controller, 0x8002, 0, 0);
+                invalidate_extra_geometry(app(controller));
                 0
             }
-            0x1a | 0x7e => {
+            0x1a => {
                 let a = app(hwnd);
                 invalidate_geometry(a);
-                place(a);
+                invalidate_extra_geometry(a);
                 0
             }
             _ => {
                 if msg == RegisterWindowMessageW(w!("TaskbarCreated").as_ptr()) {
                     let a = app(hwnd);
                     invalidate_geometry(a);
-                    place(a);
+                    invalidate_extra_geometry(a);
                     notify(hwnd, false);
                     let a = app(hwnd);
                     if !a.hook.is_null() {
@@ -1989,6 +2180,7 @@ fn main() {
             font,
             small: font,
             details: null_mut(),
+            details_owner: null_mut(),
             settings: null_mut(),
             controller: null_mut(),
             meter: null_mut(),
@@ -2005,6 +2197,7 @@ fn main() {
             meter_dpi: 96,
             drag_start: None,
             blocked: false,
+            extra_meters: Vec::new(),
             last: Instant::now(),
             notice,
             hook: null_mut(),
