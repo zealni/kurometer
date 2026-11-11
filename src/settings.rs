@@ -351,9 +351,9 @@ mod tests {
     fn gpu_adapter_name_survives_round_trip() {
         // LUIDs change across boots, so the saved identity is the display name.
         let mut original = Settings::default();
-        original.gpu = "Intel(R) Iris(R) Xe Graphics".into();
+        original.gpu = "Test GPU Adapter".into();
         let parsed = Settings::parse(&original.serialize()).unwrap();
-        assert_eq!(parsed.gpu, "Intel(R) Iris(R) Xe Graphics");
+        assert_eq!(parsed.gpu, "Test GPU Adapter");
     }
     #[test]
     fn invalid_intervals_and_empty_meter_rejected() {

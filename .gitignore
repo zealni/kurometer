@@ -31,4 +31,6 @@ id_ed25519
 settings.ini
 *.log
 *.dmp
+*.pdb
+*.core
 *.mdmp

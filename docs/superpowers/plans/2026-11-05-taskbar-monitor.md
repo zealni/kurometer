@@ -6,7 +6,7 @@
 
 **Architecture:** A single per-user native desktop process samples Windows counters and publishes timestamped readings to a compact taskbar-region window and on-demand detail/settings windows. Keep taskbar placement isolated from collection so shell failures do not corrupt readings. Do not inject into Explorer or substitute a floating widget for the core requirement.
 
-**Tech Stack:** Recommended C#, supported .NET LTS, WPF, Win32 interop, Windows GPU performance counters. The machine currently has no dotnet SDK in PATH or the standard Program Files location; a legacy .NET Framework C# compiler exists and may build a disposable Win32 placement probe without installing tooling.
+**Tech Stack:** Rust and native Win32. Build with the Rust MSVC toolchain and Windows SDK.
 
 **Spec:** ../../../../PRD.md
 

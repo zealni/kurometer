@@ -2951,16 +2951,16 @@ mod transaction_tests {
     #[test]
     fn overview_lists_each_gpu_name_with_its_live_value() {
         let gpus = vec![
-            ("intel".into(), "Intel Iris Xe Graphics".into()),
-            ("nvidia".into(), "NVIDIA GeForce RTX 4060".into()),
+            ("gpu-a".into(), "GPU A".into()),
+            ("gpu-b".into(), "GPU B".into()),
         ];
         let mut snapshot = super::sampler::Snapshot::default();
-        snapshot.gpus = vec![("intel".into(), Some(12.0)), ("nvidia".into(), Some(34.0))];
+        snapshot.gpus = vec![("gpu-a".into(), Some(12.0)), ("gpu-b".into(), Some(34.0))];
         assert_eq!(
             super::gpu_status_lines(&gpus, &snapshot),
             [
-                "GPU 1 · 12% · Intel Iris Xe Graphics",
-                "GPU 2 · 34% · NVIDIA GeForce RTX 4060",
+                "GPU 1 · 12% · GPU A",
+                "GPU 2 · 34% · GPU B",
             ]
         );
     }
