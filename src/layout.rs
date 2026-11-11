@@ -27,7 +27,7 @@ pub fn responsive_meter(width: i32, height: i32, dpi: u32, metrics: &[usize], ra
         }
         let mut font = scale(16).min(cell_height);
         for &metric in metrics {
-            let preferred = if metric == 2 && ram_both { 150 } else if metric < 3 || metric >= 5 { 88 } else { 120 };
+            let preferred = if metric == 2 && ram_both { 150 } else if metric == usize::MAX - 1 || metric == usize::MAX - 2 { 120 } else if metric < 3 || metric >= 5 { 88 } else { 120 };
             font = font.min((i64::from(cell_width) * 16 / preferred) as i32);
         }
         if font >= best_font && font > 0 {

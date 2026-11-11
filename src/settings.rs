@@ -4,6 +4,8 @@ pub struct Settings {
     pub gpu: String,
     pub all_gpus: bool,
     pub gpu_temperature: bool,
+    pub cpu_speed: bool,
+    pub disk_activity: bool,
     pub interval: u32,
     pub bits: bool,
     pub theme: u32,
@@ -30,6 +32,8 @@ impl Default for Settings {
             gpu: String::new(),
             all_gpus: false,
             gpu_temperature: false,
+            cpu_speed: false,
+            disk_activity: false,
             interval: 1,
             bits: false,
             theme: 0,
@@ -60,6 +64,8 @@ impl Settings {
                 "adapter" => s.adapter = value.parse().map_err(|_| "Invalid adapter")?,
                 "all_gpus" => s.all_gpus = value.parse().map_err(|_| "Invalid GPU selection")?,
                 "gpu_temperature" => s.gpu_temperature = value.parse().map_err(|_| "Invalid GPU temperature preference")?,
+                "cpu_speed" => s.cpu_speed = value.parse().map_err(|_| "Invalid CPU speed preference")?,
+                "disk_activity" => s.disk_activity = value.parse().map_err(|_| "Invalid disk activity preference")?,
                 "gpu" => {
                     if value.len() > 200 || value.contains(['\r', '\n']) {
                         return Err("Invalid GPU identifier".into());
@@ -174,11 +180,13 @@ impl Settings {
     }
     pub fn serialize(&self) -> String {
         format!(
-            "adapter={}\ngpu={}\nall_gpus={}\ngpu_temperature={}\ninterval={}\nbits={}\ntheme={}\nvisible={}\nlabels={}\ncharts={}\nram_format={}\norder={}\nstartup={}\ndisplay={}\nwidth={}\nposition={}\nlocked={}\noffset={}\nfont={}\nfont_size={}\ntransparent={}\npalette={}\n",
+            "adapter={}\ngpu={}\nall_gpus={}\ngpu_temperature={}\ncpu_speed={}\ndisk_activity={}\ninterval={}\nbits={}\ntheme={}\nvisible={}\nlabels={}\ncharts={}\nram_format={}\norder={}\nstartup={}\ndisplay={}\nwidth={}\nposition={}\nlocked={}\noffset={}\nfont={}\nfont_size={}\ntransparent={}\npalette={}\n",
             self.adapter,
             self.gpu,
             self.all_gpus,
             self.gpu_temperature,
+            self.cpu_speed,
+            self.disk_activity,
             self.interval,
             self.bits,
             self.theme,
@@ -252,6 +260,13 @@ mod tests {
         assert!(Settings::parse("font_size=33\n").is_err());
     }
     #[test]
+    fn extra_meter_preferences_round_trip() {
+        let parsed = Settings::parse("cpu_speed=true\ndisk_activity=true\n").unwrap();
+        let restored = Settings::parse(&parsed.serialize()).unwrap();
+        assert!(restored.cpu_speed && restored.disk_activity);
+        assert!(Settings::parse("cpu_speed=maybe\n").is_err());
+    }
+    #[test]
     fn chart_selection_survives_restart() {
         let settings = Settings::parse("charts=10101\n").unwrap();
         assert_eq!(settings.charts, [true, false, true, false, true]);
@@ -273,6 +288,8 @@ mod tests {
             gpu: "luid_1_phys_0".into(),
             all_gpus: false,
             gpu_temperature: false,
+            cpu_speed: false,
+            disk_activity: false,
             interval: 5,
             bits: true,
             theme: 2,

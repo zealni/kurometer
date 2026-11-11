@@ -458,6 +458,7 @@ struct Meter {
     dpi: u32,
     blocked: bool,
 }
+
 struct App {
     config: settings::Settings,
     worker: worker::Worker,
@@ -563,6 +564,10 @@ fn meter_transparency(hwnd: H, enabled: bool, theme: u32) {
 fn percentage(v: Option<f64>) -> String {
     v.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "--".into())
 }
+fn cpu_clock(mhz: Option<f64>) -> String {
+    mhz.map(|v| format!("{:.2} GHz", v / 1000.0)).unwrap_or_else(|| "--".into())
+}
+
 fn ram_value(ram: Option<f64>, used: u64, format: u32) -> String {
     match (ram, format) {
         (Some(_), 1) => format!("{:.1} GiB", used as f64 / 1073741824.0),
@@ -854,6 +859,10 @@ fn apply_scan_results(a: &mut App) {
     }
 }
 
+const CPU_CLOCK: usize = usize::MAX;
+const DISK_READ: usize = usize::MAX - 1;
+const DISK_WRITE: usize = usize::MAX - 2;
+
 fn selected_metrics(config: &settings::Settings, gpus: &[(String, String)]) -> Vec<usize> {
     let names = ["CPU", "GPU", "RAM", "Download", "Upload"];
     let mut result = Vec::new();
@@ -866,6 +875,8 @@ fn selected_metrics(config: &settings::Settings, gpus: &[(String, String)]) -> V
             }
         }
     }
+    if config.cpu_speed { result.push(CPU_CLOCK); }
+    if config.disk_activity { result.extend([DISK_READ, DISK_WRITE]); }
     result
 }
 
@@ -1180,8 +1191,12 @@ fn panel_anchor(a: &App, owner: H) -> H {
     a.extra_meters.first().map(|m| m.hwnd).unwrap_or(null_mut())
 }
 
+fn details_extra_height(config: &settings::Settings) -> i32 {
+    24 * (i32::from(config.cpu_speed) + i32::from(config.disk_activity))
+}
+
 fn details_content_height(config: &settings::Settings) -> i32 {
-    313 + config.visible.iter().zip(config.charts).filter(|(visible, chart)| **visible && *chart).count() as i32 * 40
+    313 + details_extra_height(config) + config.visible.iter().zip(config.charts).filter(|(visible, chart)| **visible && *chart).count() as i32 * 40
 }
 
 fn position_details(a: &App, panel: H, owner: H) {
@@ -1206,6 +1221,7 @@ fn position_details(a: &App, panel: H, owner: H) {
                 let dx = GetScrollPos(panel, 0);
                 SetWindowPos(get_child(panel, 501), null_mut(), 24 - dx, y, 0, 0, 0x15);
                 SetWindowPos(get_child(panel, 502), null_mut(), 146 - dx, y, 0, 0, 0x15);
+                SetWindowPos(get_child(panel, 620), null_mut(), 0, 0, 390, 68 + details_extra_height(&a.config), 0x16);
                 let mut client = Rect::default();
                 for _ in 0..2 {
                     GetClientRect(panel, &mut client);
@@ -1555,6 +1571,8 @@ fn open_settings(hwnd: H) {
             0x10000 | 3,
         );
         SendMessageW(transparent, 0xf1, a.config.transparent as usize, 0);
+        let cpu_speed = control(h, "BUTTON", "CPU frequency", 124, 270, 620, 200, 26, 0x10000 | 3);
+        SendMessageW(cpu_speed, 0xf1, a.config.cpu_speed as usize, 0);
         control(h, "STATIC", "Meter color", 0, 24, 655, 90, 22, 0);
         let palette = control(h, "COMBOBOX", "", 115, 120, 650, 250, 130, 0x10000 | 3);
         for label in ["Blue", "Green", "Amber"] {
@@ -1583,6 +1601,8 @@ fn open_settings(hwnd: H) {
                 140, 26, 0x10000 | 3);
             SendMessageW(check, 0xf1, a.config.charts[i] as usize, 0);
         }
+        let disk = control(h, "BUTTON", "Disk read/write", 125, 314, 870, 160, 26, 0x10000 | 3);
+        SendMessageW(disk, 0xf1, a.config.disk_activity as usize, 0);
         control(h, "BUTTON", "Save settings", 201, 24, 910, 160, 36, 0x10000 | 0xb);
         control(h, "BUTTON", "Cancel", 202, 200, 910, 110, 36, 0x10000 | 0xb);
         let mut client = Rect::default();
@@ -1778,9 +1798,11 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         != rate(a.snapshot.download, a.config.bits)
                     || rate(next.upload, a.config.bits) != rate(a.snapshot.upload, a.config.bits)
                     || (a.config.all_gpus && next.gpus != a.snapshot.gpus)
-                    || (a.config.gpu_temperature && next.gpu_temperatures != a.snapshot.gpu_temperatures);
-                a.snapshot = next;
-                a.last = stamp;
+                    || (a.config.gpu_temperature && next.gpu_temperatures != a.snapshot.gpu_temperatures)
+                    || (a.config.cpu_speed && cpu_clock(next.cpu_mhz) != cpu_clock(a.snapshot.cpu_mhz))
+                    || (a.config.disk_activity && (rate(next.disk_read, false) != rate(a.snapshot.disk_read, false)
+                        || rate(next.disk_write, false) != rate(a.snapshot.disk_write, false)))
+                    ;
                 if changed || (new_sample && a.config.charts.iter().any(|&v| v)) {
                     if a.visible && !a.blocked && !a.meter.is_null() { InvalidateRect(a.meter, std::ptr::null(), 0); }
                     for meter in &a.extra_meters {
@@ -1831,6 +1853,8 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         }
                         next.all_gpus = SendMessageW(get_child(hwnd, 122), 0xf0, 0, 0) == 1;
                         next.gpu_temperature = SendMessageW(get_child(hwnd, 123), 0xf0, 0, 0) == 1;
+                        next.cpu_speed = SendMessageW(get_child(hwnd, 124), 0xf0, 0, 0) == 1;
+                        next.disk_activity = SendMessageW(get_child(hwnd, 125), 0xf0, 0, 0) == 1;
                         let interval = SendMessageW(get_child(hwnd, 102), 0x147, 0, 0);
                         next.interval = match interval {
                             1 => 2,
@@ -1995,14 +2019,23 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                             2 => ("RAM ".to_string(), ram_value(s.ram, s.used, a.config.ram_format)),
                             3 => ("↓ ".to_string(), rate(s.download, a.config.bits)),
                             4 => ("↑ ".to_string(), rate(s.upload, a.config.bits)),
+                            CPU_CLOCK => ("Clock ".to_string(), cpu_clock(s.cpu_mhz)),
+                            DISK_READ => ("Disk R ".to_string(), rate(s.disk_read, false)),
+                            DISK_WRITE => ("Disk W ".to_string(), rate(s.disk_write, false)),
                             _ => (format!("GPU{} ", i - 4), percentage(s.gpus.iter().find(|(id, _)| id.eq_ignore_ascii_case(&a.gpus[i - 5].0)).and_then(|(_, value)| *value))),
                         };
-                        if a.config.gpu_temperature && (i == 1 || i >= 5) {
+                        if a.config.gpu_temperature && (i == 1 || (i >= 5 && i < DISK_WRITE)) {
                             let id = if i == 1 { s.gpu_id.as_str() } else { a.gpus[i - 5].0.as_str() };
                             let temp = s.gpu_temperatures.iter().find(|(gpu, _)| gpu.eq_ignore_ascii_case(id)).map(|(_, t)| format!("{t:.0}°C")).unwrap_or_else(|| "--°C".into());
                             value.push_str(&format!(" {temp}"));
                         }
-                        (if a.config.labels[if i >= 5 { 1 } else { i }] { label } else { String::new() }, value)
+                        let show_label = match i {
+                            CPU_CLOCK => a.config.labels[0],
+                            DISK_READ | DISK_WRITE => true,
+                            5.. => a.config.labels[1],
+                            _ => a.config.labels[i],
+                        };
+                        (if show_label { label } else { String::new() }, value)
                     }).collect();
                     let face = wide(&a.config.font);
                     let mut font_px = if a.config.font_size == 0 { meter_layout.font_px } else { scale_pixels(a.config.font_size as i32, meter_dpi, 96) }.max(1);
@@ -2038,7 +2071,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         let prefix = prefix.as_str();
                         let chart_width = if i < 5 && a.config.charts[i] { scale_pixels(18, meter_dpi, 96).min((right - left) / 3) } else { 0 };
                         let text_right = right - chart_width;
-                        let used = if i >= 5 {
+                        let used = if i >= 5 && i < DISK_WRITE {
                             s.gpus.iter().find(|(id, _)| id.eq_ignore_ascii_case(&a.gpus[i - 5].0)).and_then(|(_, value)| *value)
                         } else {
                             [s.cpu, s.gpu, s.ram].get(i).copied().flatten()
@@ -2115,14 +2148,18 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     let gpu = a.gpus.iter().find(|(id, _)| id.eq_ignore_ascii_case(&s.gpu_id))
                         .map(|(_, name)| name.as_str()).unwrap_or("Unavailable / selected GPU missing");
                     let notice = if a.blocked { "Meter hidden: insufficient taskbar space" } else { a.notice.as_str() };
-                    SetWindowTextW(get_child(hwnd, 620), wide(&format!("{name} · {}\nGPU: {gpu}\n{notice}", s.network_status)).as_ptr());
+                    let mut status = format!("{name} · {}\nGPU: {gpu}", s.network_status);
+                    if a.config.cpu_speed { status.push_str(&format!("\nCPU frequency: {}", cpu_clock(s.cpu_mhz))); }
+                    if a.config.disk_activity { status.push_str(&format!("\nDisk: read {} · write {}", rate(s.disk_read, false), rate(s.disk_write, false))); }
+                    if !notice.is_empty() { status.push_str(&format!("\n{notice}")); }
+                    SetWindowTextW(get_child(hwnd, 620), wide(&status).as_ptr());
                     let dx = GetScrollPos(hwnd, 0);
                     let dy = GetScrollPos(hwnd, 1);
                     let names = ["CPU", "GPU", "RAM", "Download", "Upload"];
                     let mut row = 0;
                     for i in 0..5 {
                         if a.config.visible[i] && a.config.charts[i] {
-                            let top = 265 + row * 40 - dy;
+                            let top = 265 + details_extra_height(&a.config) + row * 40 - dy;
                             let mut label = Rect { left: 24 - dx, top, right: 115 - dx, bottom: top + 30 };
                             SetTextColor(dc, fg);
                             DrawTextW(dc, wide(names[i]).as_ptr(), -1, &mut label, 0x824);

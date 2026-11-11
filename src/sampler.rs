@@ -47,6 +47,9 @@ pub fn gpus() -> Vec<(String, String)> {
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub cpu: Option<f64>,
+    pub cpu_mhz: Option<f64>,
+    pub disk_read: Option<f64>,
+    pub disk_write: Option<f64>,
     pub ram: Option<f64>,
     pub used: u64,
     pub total: u64,
@@ -98,12 +101,34 @@ fn times() -> Option<[u64; 3]> {
         Some([cv(idle), cv(kernel), cv(user)])
     }
 }
+fn disk_rate(previous: &mut Option<(u64, Instant)>, current: Option<u64>, now: Instant) -> Option<f64> {
+    let rate = previous.zip(current).and_then(|((old, time), new)| {
+        transfer_rate(old, new, now.duration_since(time).as_secs_f64())
+    });
+    *previous = current.map(|value| (value, now));
+    rate
+}
+
+unsafe fn raw_counter(counter: PDH_HCOUNTER) -> Option<u64> {
+    let mut value = PDH_RAW_COUNTER::default();
+    if unsafe { PdhGetRawCounterValue(counter, None, &mut value) } != 0 || value.CStatus > 1 {
+        return None;
+    }
+    u64::try_from(value.FirstValue).ok()
+}
+
+
 pub struct Sampler {
     previous_cpu: Option<[u64; 3]>,
     previous_net: Option<(u64, u64, Instant)>,
+    previous_disk_read: Option<(u64, Instant)>,
+    previous_disk_write: Option<(u64, Instant)>,
     pub adapter: u64,
     query: PDH_HQUERY,
     counter: PDH_HCOUNTER,
+    cpu_frequency: PDH_HCOUNTER,
+    disk_read: PDH_HCOUNTER,
+    disk_write: PDH_HCOUNTER,
     buffer: Vec<usize>,
     pub gpu_id: String,
 }
@@ -112,23 +137,32 @@ impl Sampler {
         unsafe {
             let mut query = Default::default();
             let mut counter = Default::default();
+            let mut cpu_frequency = Default::default();
+            let mut disk_read = Default::default();
+            let mut disk_write = Default::default();
             if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) == 0 {
-                if PdhAddEnglishCounterW(
+                PdhAddEnglishCounterW(query, w!("\\Processor Information(_Total)\\Processor Frequency"), 0, &mut cpu_frequency);
+                PdhAddEnglishCounterW(query, w!("\\PhysicalDisk(_Total)\\Disk Read Bytes/sec"), 0, &mut disk_read);
+                PdhAddEnglishCounterW(query, w!("\\PhysicalDisk(_Total)\\Disk Write Bytes/sec"), 0, &mut disk_write);
+                PdhAddEnglishCounterW(
                     query,
                     w!("\\GPU Engine(*)\\Utilization Percentage"),
                     0,
                     &mut counter,
-                ) == 0
-                {
-                    PdhCollectQueryData(query);
-                }
+                );
+                PdhCollectQueryData(query);
             }
             Self {
                 previous_cpu: None,
                 previous_net: None,
+                previous_disk_read: None,
+                previous_disk_write: None,
                 adapter,
                 query,
                 counter,
+                cpu_frequency,
+                disk_read,
+                disk_write,
                 buffer: vec![],
                 gpu_id,
             }
@@ -139,10 +173,7 @@ impl Sampler {
             let mut s = Snapshot::default();
             let now = Instant::now();
             let current = times();
-            s.cpu = self
-                .previous_cpu
-                .zip(current)
-                .and_then(|(p, c)| cpu_busy(p, c));
+            s.cpu = self.previous_cpu.zip(current).and_then(|(p, c)| cpu_busy(p, c));
             self.previous_cpu = current;
             let mut memory = MEMORYSTATUSEX {
                 dwLength: size_of::<MEMORYSTATUSEX>() as u32,
@@ -179,6 +210,17 @@ impl Sampler {
             }
             let mut groups = BTreeMap::<String, Vec<(String, f64)>>::new();
             if PdhCollectQueryData(self.query) == 0 {
+                let mut frequency = PDH_FMT_COUNTERVALUE::default();
+                if PdhGetFormattedCounterValue(self.cpu_frequency, PDH_FMT_DOUBLE, None, &mut frequency) == 0
+                    && frequency.CStatus <= 1
+                {
+                    let mhz = frequency.Anonymous.doubleValue;
+                    if mhz.is_finite() && mhz > 0.0 {
+                        s.cpu_mhz = Some(mhz);
+                    }
+                }
+                s.disk_read = disk_rate(&mut self.previous_disk_read, raw_counter(self.disk_read), now);
+                s.disk_write = disk_rate(&mut self.previous_disk_write, raw_counter(self.disk_write), now);
                 let (mut bytes, mut count) = (0, 0);
                 let status = PdhGetFormattedCounterArrayW(
                     self.counter,
@@ -220,6 +262,9 @@ impl Sampler {
                         }
                     }
                 }
+            } else {
+                self.previous_disk_read = None;
+                self.previous_disk_write = None;
             }
             if self.gpu_id.is_empty() {
                 if let Some((id, _)) = groups.iter().find(|(_, rows)| !rows.is_empty()) {
@@ -243,5 +288,22 @@ impl Drop for Sampler {
         unsafe {
             PdhCloseQuery(self.query);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn disk_rate_handles_initial_sample_reset_and_unavailable() {
+        let now = Instant::now();
+        let mut previous = None;
+        assert_eq!(disk_rate(&mut previous, Some(100), now), None);
+        assert_eq!(disk_rate(&mut previous, Some(1100), now + Duration::from_secs(2)), Some(500.0));
+        assert_eq!(disk_rate(&mut previous, Some(10), now + Duration::from_secs(3)), None);
+        assert_eq!(disk_rate(&mut previous, None, now + Duration::from_secs(4)), None);
+        assert_eq!(disk_rate(&mut previous, Some(20), now + Duration::from_secs(5)), None);
     }
 }
