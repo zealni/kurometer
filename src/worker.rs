@@ -27,7 +27,10 @@ impl Worker {
             let mut config = config;
             let mut sampler = Sampler::new(config.adapter, resolve(&config.gpu));
             loop {
-                let value = sampler.sample();
+                let mut value = sampler.sample();
+                if config.gpu_temperature {
+                    value.gpu_temperatures = crate::temperature::gpu_temperatures();
+                }
                 let _ = out.try_send((value, Instant::now()));
                 match rx.recv_timeout(Duration::from_secs(config.interval as u64)) {
                     Ok(Some(next)) => {

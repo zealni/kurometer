@@ -1,11 +1,11 @@
 pub struct MeterLayout {
-    pub cells: [(i32, i32, i32, i32); 5],
+    pub cells: Vec<(i32, i32, i32, i32)>,
     pub font_px: i32,
 }
 
 pub fn responsive_meter(width: i32, height: i32, dpi: u32, metrics: &[usize], ram_both: bool) -> MeterLayout {
-    let mut layout = MeterLayout { cells: [(0, 0, 0, 0); 5], font_px: 0 };
-    if width <= 0 || height <= 0 || metrics.is_empty() || metrics.len() > 5 {
+    let mut layout = MeterLayout { cells: vec![(0, 0, 0, 0); metrics.len()], font_px: 0 };
+    if width <= 0 || height <= 0 || metrics.is_empty() {
         return layout;
     }
 
@@ -27,7 +27,7 @@ pub fn responsive_meter(width: i32, height: i32, dpi: u32, metrics: &[usize], ra
         }
         let mut font = scale(16).min(cell_height);
         for &metric in metrics {
-            let preferred = if metric == 2 && ram_both { 150 } else if metric < 3 { 88 } else { 120 };
+            let preferred = if metric == 2 && ram_both { 150 } else if metric < 3 || metric >= 5 { 88 } else { 120 };
             font = font.min((i64::from(cell_width) * 16 / preferred) as i32);
         }
         if font >= best_font && font > 0 {
@@ -52,9 +52,13 @@ pub fn responsive_meter(width: i32, height: i32, dpi: u32, metrics: &[usize], ra
 
 pub const PRIMARY_DISPLAY: &str = "__primary__";
 pub const ALL_DISPLAYS: &str = "__all__";
+pub const SECONDARY_DISPLAYS: &str = "__secondary__";
 pub fn display_targets(choice: &str, displays: &[(&str, bool)]) -> Vec<usize> {
     if choice == ALL_DISPLAYS {
         return (0..displays.len()).collect();
+    }
+    if choice == SECONDARY_DISPLAYS {
+        return displays.iter().enumerate().filter_map(|(i, (_, primary))| (!primary).then_some(i)).collect();
     }
     displays.iter().position(|(id, primary)| {
         if choice.is_empty() || choice == PRIMARY_DISPLAY { *primary } else { *id == choice }
@@ -68,8 +72,8 @@ pub fn settings_bounds(
     let (left, top, right, bottom) = work;
     let width = size.0.clamp(1, (right - left).max(1));
     let height = size.1.clamp(1, (bottom - top).max(1));
-    let x = meter.0.clamp(left, (right - width).max(left));
-    (x, (bottom - height).max(top), width, height)
+    let (x, y) = popup_position(meter, (width, height), work);
+    (x, y, width, height)
 }
 pub fn keep_meter_visible_during_refresh(_hosted: bool, taskbar_alive: bool, last_position_safe: bool) -> bool {
     taskbar_alive && last_position_safe
@@ -200,11 +204,11 @@ mod tests {
         for (width, height) in [(0, 40), (260, 0), (-1, 40), (260, -1), (1, 1)] {
             let layout = responsive_meter(width, height, 96, &[0, 1, 2, 3, 4], true);
             assert_eq!(layout.font_px, 0);
-            assert_eq!(layout.cells, [(0, 0, 0, 0); 5]);
+            assert_eq!(layout.cells, vec![(0, 0, 0, 0); 5]);
         }
         let empty = responsive_meter(260, 40, 96, &[], false);
         assert_eq!(empty.font_px, 0);
-        assert_eq!(empty.cells, [(0, 0, 0, 0); 5]);
+        assert!(empty.cells.is_empty());
     }
     #[test]
     fn child_placement_uses_screen_coordinates_on_negative_origin_display() {
@@ -272,11 +276,13 @@ mod tests {
         assert_eq!(display_targets(ALL_DISPLAYS, &displays), [0, 1]);
         assert_eq!(display_targets("DISPLAY2", &displays), [1]);
         assert_eq!(display_targets("removed", &displays), [0]);
+        assert_eq!(display_targets("__secondary__", &displays), [1]);
+        assert!(display_targets("__secondary__", &[("DISPLAY1", true)]).is_empty());
         assert!(display_targets(ALL_DISPLAYS, &[]).is_empty());
     }
     #[test]
     fn settings_panel_sits_low_and_clamps_to_negative_origin_work_area() {
-        assert_eq!(settings_bounds((-1750, 12, -1300, 56), (520, 560), (-1920, 0, 0, 1020)), (-1750, 460, 520, 560));
+        assert_eq!(settings_bounds((-1750, 12, -1300, 56), (520, 560), (-1920, 0, 0, 1020)), (-1750, 64, 520, 560));
         assert_eq!(settings_bounds((1500, 20, 1800, 64), (520, 560), (0, 0, 1920, 550)), (1400, 0, 520, 550));
     }
     #[test]

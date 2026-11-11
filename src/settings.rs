@@ -2,6 +2,8 @@
 pub struct Settings {
     pub adapter: u64,
     pub gpu: String,
+    pub all_gpus: bool,
+    pub gpu_temperature: bool,
     pub interval: u32,
     pub bits: bool,
     pub theme: u32,
@@ -17,6 +19,7 @@ pub struct Settings {
     pub offset: i32,
     pub locked: bool,
     pub font: String,
+    pub font_size: u32,
     pub transparent: bool,
     pub palette: u32,
 }
@@ -25,6 +28,8 @@ impl Default for Settings {
         Self {
             adapter: 0,
             gpu: String::new(),
+            all_gpus: false,
+            gpu_temperature: false,
             interval: 1,
             bits: false,
             theme: 0,
@@ -40,6 +45,7 @@ impl Default for Settings {
             offset: -1,
             locked: false,
             font: "Segoe UI Variable".into(),
+            font_size: 0,
             transparent: false,
             palette: 0,
         }
@@ -52,6 +58,8 @@ impl Settings {
             let (key, value) = line.split_once('=').ok_or("Malformed settings line")?;
             match key {
                 "adapter" => s.adapter = value.parse().map_err(|_| "Invalid adapter")?,
+                "all_gpus" => s.all_gpus = value.parse().map_err(|_| "Invalid GPU selection")?,
+                "gpu_temperature" => s.gpu_temperature = value.parse().map_err(|_| "Invalid GPU temperature preference")?,
                 "gpu" => {
                     if value.len() > 200 || value.contains(['\r', '\n']) {
                         return Err("Invalid GPU identifier".into());
@@ -144,6 +152,12 @@ impl Settings {
                     }
                     s.font = value.into();
                 }
+                "font_size" => {
+                    s.font_size = value.parse().map_err(|_| "Invalid font size")?;
+                    if s.font_size != 0 && !(8..=32).contains(&s.font_size) {
+                        return Err("Font size must be Auto or 8–32 pixels".into());
+                    }
+                }
                 "transparent" => {
                     s.transparent = value.parse().map_err(|_| "Invalid transparency")?
                 }
@@ -160,9 +174,11 @@ impl Settings {
     }
     pub fn serialize(&self) -> String {
         format!(
-            "adapter={}\ngpu={}\ninterval={}\nbits={}\ntheme={}\nvisible={}\nlabels={}\ncharts={}\nram_format={}\norder={}\nstartup={}\ndisplay={}\nwidth={}\nposition={}\nlocked={}\noffset={}\nfont={}\ntransparent={}\npalette={}\n",
+            "adapter={}\ngpu={}\nall_gpus={}\ngpu_temperature={}\ninterval={}\nbits={}\ntheme={}\nvisible={}\nlabels={}\ncharts={}\nram_format={}\norder={}\nstartup={}\ndisplay={}\nwidth={}\nposition={}\nlocked={}\noffset={}\nfont={}\nfont_size={}\ntransparent={}\npalette={}\n",
             self.adapter,
             self.gpu,
+            self.all_gpus,
+            self.gpu_temperature,
             self.interval,
             self.bits,
             self.theme,
@@ -181,6 +197,7 @@ impl Settings {
             self.locked,
             self.offset,
             self.font,
+            self.font_size,
             self.transparent,
             self.palette,
         )
@@ -228,6 +245,13 @@ mod tests {
         assert!(Settings::parse("font=\n").is_err());
     }
     #[test]
+    fn font_size_round_trips_and_rejects_out_of_range() {
+        let settings = Settings::parse("font_size=14\n").unwrap();
+        assert_eq!(Settings::parse(&settings.serialize()).unwrap().font_size, 14);
+        assert!(Settings::parse("font_size=7\n").is_err());
+        assert!(Settings::parse("font_size=33\n").is_err());
+    }
+    #[test]
     fn chart_selection_survives_restart() {
         let settings = Settings::parse("charts=10101\n").unwrap();
         assert_eq!(settings.charts, [true, false, true, false, true]);
@@ -247,6 +271,8 @@ mod tests {
         let original = Settings {
             adapter: 42,
             gpu: "luid_1_phys_0".into(),
+            all_gpus: false,
+            gpu_temperature: false,
             interval: 5,
             bits: true,
             theme: 2,
@@ -262,6 +288,7 @@ mod tests {
             locked: true,
             offset: 120,
             font: "Consolas".into(),
+            font_size: 0,
             transparent: true,
             palette: 2,
         };

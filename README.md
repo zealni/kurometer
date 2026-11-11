@@ -17,17 +17,19 @@ The executable retains its existing name to preserve compatibility. Its Windows 
 
 ## Controls and settings
 
-Left-click the meter or its notification-area icon to open the details panel. Right-click either for details, settings, show/hide, and exit. The details panel also opens settings and Task Manager. Press Escape to close a panel.
+Left-click the meter or its notification-area icon to open the details panel. Right-click either for details, settings, show/hide, and exit. The details panel also opens settings and Task Manager. Details and settings open beside the meter, within its display's work area. Press Escape to close a panel.
 
-When the background is transparent, click a visible character; transparent pixels pass through to the taskbar.
+With a transparent background, the meter's whole reserved area accepts clicks. Taskbar controls outside that area remain accessible.
 
-Settings include the network and GPU adapters, refresh interval, bits or bytes, theme, font, transparent background, color palette, meter width and positioning, position lock, visible readings and their order, and optional sign-in startup. Display selection offers the primary taskbar, all taskbar-backed displays, or one named display. Settings opens as a compact, scrollable panel near the selected taskbar. In the fallback overlay mode, positioning unlocked allows moving the meter and dragging its right edge to resize it; while hosted by the taskbar those gestures are unavailable, so use Settings.
+Settings include the network and GPU adapters, refresh interval, bits or bytes, theme, font, transparent background, color palette, meter width and positioning, position lock, visible readings and their order, and optional sign-in startup. Display selection offers the primary taskbar, all taskbar-backed displays, secondary taskbar-backed displays only, or one named display. Settings opens as a scrollable panel near the selected taskbar. In the fallback overlay mode, positioning unlocked allows moving the meter and dragging its right edge to resize it; while hosted by the taskbar those gestures are unavailable, so use Settings.
 
-Choose which metrics, labels, and history charts appear individually. RAM can show percentage, used GiB, or both (for example, `72% · 11.4 GiB`). CPU, GPU, and RAM readings turn red at 95% or above. The font selector lists installed Windows fonts; existing font preferences remain unchanged. Settings uses two columns when the screen is wide enough and scrolls on smaller displays.
+Choose which metrics, labels, and history charts appear individually. RAM can show percentage, used GiB, or both (for example, `72% · 11.4 GiB`). CPU, GPU, and RAM readings turn red at 95% or above. The font selector offers common installed fonts and preserves an existing preference; the size selector sets a maximum that shrinks uniformly when needed to fit. Settings groups reading sources and taskbar display controls in two columns when the screen is wide enough and scrolls on smaller displays. The overview aligns readings and values in separate columns.
+
+Enable **Show all GPUs** to add a separate meter for each detected adapter. **GPU temperature** uses the installed NVIDIA CUDA and NVML drivers when available; unsupported or inaccessible sensors show `--°C`. CPU and non-NVIDIA GPU temperatures are not provided. Additional GPU meters do not have separate history charts.
 
 Enabled charts appear beside taskbar readings and in the details panel. History retains the latest 60 samples in memory, at the selected refresh interval, and resets when Kurmon exits. Network charts scale to the maximum observed rate; they do not represent network capacity.
 
-Meter cells and text adapt to the available taskbar height, width, enabled metrics, and display scale. Width and custom offset are stored as 96-DPI logical pixels; existing values saved by older versions at a different scale are not migrated because their original DPI is unknown. Automatic placement shrinks the meter to an available gap; if the layout cannot fit safely, the meter hides rather than covering taskbar controls.
+Meter cells and text adapt to the available taskbar height, width, enabled metrics, and display scale. Width and custom offset are stored as 96-DPI logical pixels; existing values saved by older versions at a different scale are not migrated because their original DPI is unknown. Automatic placement shrinks the meter to an available gap. On secondary displays, an unsafe preferred position falls back to automatic placement; if the layout cannot fit safely, the meter hides rather than covering taskbar controls.
 
 ## Installation
 

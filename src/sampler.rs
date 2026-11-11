@@ -54,6 +54,8 @@ pub struct Snapshot {
     pub upload: Option<f64>,
     pub gpu: Option<f64>,
     pub gpu_id: String,
+    pub gpus: Vec<(String, Option<f64>)>,
+    pub gpu_temperatures: Vec<(String, f64)>,
     pub network_status: String,
 }
 pub fn adapters() -> Vec<Adapter> {
@@ -202,12 +204,13 @@ impl Sampler {
                             self.buffer.as_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>(),
                             count as usize,
                         ) {
-                            if item.FmtValue.CStatus <= 1 {
-                                let name = item.szName.to_string().unwrap_or_default();
-                                if let Some(start) = name.find("luid_") {
-                                    let engine = &name[start..];
-                                    if let Some(end) = engine.find("_eng_") {
-                                        groups.entry(engine[..end].into()).or_default().push((
+                            let name = item.szName.to_string().unwrap_or_default();
+                            if let Some(start) = name.find("luid_") {
+                                let engine = &name[start..];
+                                if let Some(end) = engine.find("_eng_") {
+                                    let rows = groups.entry(engine[..end].into()).or_default();
+                                    if item.FmtValue.CStatus <= 1 {
+                                        rows.push((
                                             engine.into(),
                                             item.FmtValue.Anonymous.doubleValue,
                                         ));
@@ -219,7 +222,7 @@ impl Sampler {
                 }
             }
             if self.gpu_id.is_empty() {
-                if let Some(id) = groups.keys().next() {
+                if let Some((id, _)) = groups.iter().find(|(_, rows)| !rows.is_empty()) {
                     self.gpu_id = id.clone();
                 }
             }
@@ -227,6 +230,10 @@ impl Sampler {
                 .get(&self.gpu_id)
                 .and_then(|rows| busiest_engine(rows));
             s.gpu_id = self.gpu_id.clone();
+            s.gpus = groups
+                .into_iter()
+                .map(|(id, rows)| (id, busiest_engine(&rows)))
+                .collect();
             s
         }
     }
