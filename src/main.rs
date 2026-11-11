@@ -136,20 +136,10 @@ unsafe extern "system" {
     fn SetLayeredWindowAttributes(hwnd: H, key: u32, alpha: u8, flags: u32) -> i32;
     fn LoadIconW(instance: H, name: *const u16) -> H;
     fn LoadCursorW(instance: H, name: *const u16) -> H;
-    fn CreatePopupMenu() -> H;
-    fn AppendMenuW(menu: H, flags: u32, id: usize, label: *const u16) -> i32;
-    fn TrackPopupMenu(
-        menu: H,
-        flags: u32,
-        x: i32,
-        y: i32,
-        reserved: i32,
-        hwnd: H,
-        r: *const Rect,
-    ) -> i32;
-    fn DestroyMenu(menu: H) -> i32;
     fn GetCursorPos(p: *mut [i32; 2]) -> i32;
     fn SetForegroundWindow(hwnd: H) -> i32;
+    fn EnableWindow(hwnd: H, enable: i32) -> i32;
+    fn SetFocus(hwnd: H) -> H;
     fn MessageBoxW(hwnd: H, text: *const u16, title: *const u16, flags: u32) -> i32;
     fn SetWinEventHook(
         min: u32,
@@ -219,6 +209,7 @@ unsafe extern "system" {
     fn CreatePen(style: i32, width: i32, color: u32) -> H;
     fn MoveToEx(dc: H, x: i32, y: i32, old: *mut [i32; 2]) -> i32;
     fn LineTo(dc: H, x: i32, y: i32) -> i32;
+    fn Polygon(dc: H, points: *const [i32; 2], count: i32) -> i32;
     fn Ellipse(dc: H, left: i32, top: i32, right: i32, bottom: i32) -> i32;
     fn GetStockObject(index: i32) -> H;
     fn EnumFontFamiliesExW(dc: H, font: *const LogFont, callback: Option<unsafe extern "system" fn(*const LogFont, *const c_void, u32, isize) -> i32>, data: isize, flags: u32) -> i32;
@@ -324,6 +315,56 @@ fn draw_history(dc: H, history: &history::History, index: usize, rect: Rect, col
         DeleteObject(pen);
     }
 }
+fn draw_ram_history(dc: H, history: &history::History, rect: Rect, light: bool) {
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width < 2 || height < 2 { return; }
+    unsafe {
+        let background = CreateSolidBrush(if light { rgb(0xf5, 0xf8, 0xfb) } else { rgb(0x17, 0x17, 0x17) });
+        FillRect(dc, &rect, background);
+        DeleteObject(background);
+
+        let fill = CreateSolidBrush(if light { rgb(0xd3, 0xe8, 0xf7) } else { rgb(0x0c, 0x22, 0x38) });
+        let old_brush = SelectObject(dc, fill);
+        let old_pen = SelectObject(dc, GetStockObject(8));
+        let count = history.points(2).count();
+        let mut points = [[0i32; 2]; 62];
+        let mut len = 0usize;
+        for (i, value) in history.points(2).chain(std::iter::once(None)).enumerate() {
+            if let Some(value) = value.filter(|value| value.is_finite()) {
+                let x = rect.right - 1 - ((count - 1 - i) as i32 * (width - 1) / 59);
+                let y = rect.bottom - 1 - (value.clamp(0.0, 100.0) / 100.0 * (height - 1) as f64) as i32;
+                if len == 0 { points[0] = [x, rect.bottom - 1]; len = 1; }
+                points[len] = [x, y];
+                len += 1;
+            } else if len > 1 {
+                points[len] = [points[len - 1][0], rect.bottom - 1];
+                Polygon(dc, points.as_ptr(), (len + 1) as i32);
+                len = 0;
+            }
+        }
+        SelectObject(dc, old_brush);
+        SelectObject(dc, old_pen);
+        DeleteObject(fill);
+
+        let grid = CreatePen(0, 1, if light { rgb(0xc8, 0xd2, 0xda) } else { rgb(0x31, 0x39, 0x40) });
+        let old = SelectObject(dc, grid);
+        for i in 0..=10 {
+            let y = rect.top + i * (height - 1) / 10;
+            MoveToEx(dc, rect.left, y, null_mut());
+            LineTo(dc, rect.right, y);
+        }
+        for i in 0..=20 {
+            let x = rect.left + i * (width - 1) / 20;
+            MoveToEx(dc, x, rect.top, null_mut());
+            LineTo(dc, x, rect.bottom);
+        }
+        SelectObject(dc, old);
+        DeleteObject(grid);
+    }
+    draw_history(dc, history, 2, rect, if light { rgb(0x0f, 0x6c, 0xbd) } else { rgb(0x4c, 0xc2, 0xff) });
+}
+
 fn draw_metric_icon(dc: H, metric: usize, rect: Rect, color: u32, dpi: u32) -> i32 {
     let size = scale_pixels(12, dpi, 96).min((rect.bottom - rect.top - 4).max(0));
     if size < 6 {
@@ -545,6 +586,11 @@ struct App {
     details: H,
     details_owner: H,
     settings: H,
+    settings_original: Option<settings::Settings>,
+    settings_dirty: bool,
+    choice: H,
+    choice_result: i32,
+    choice_menu: bool,
     controller: H,
     meter: H,
     parent: H,
@@ -1113,7 +1159,7 @@ unsafe fn place(a: &mut App) {
                     return;
                 };
                 let selected = selected_metrics(&a.config, &a.gpus);
-                let meter_layout = layout::responsive_meter(width, height, dpi, &selected, a.config.ram_format == 2);
+                let meter_layout = layout::responsive_meter(width, height, dpi, &selected, a.config.ram_format == 2, a.config.grid_columns);
                 if meter_layout.font_px < scale_pixels(8, dpi, 96) {
                     a.blocked = true;
                     ShowWindow(meter, 0);
@@ -1139,7 +1185,7 @@ unsafe fn place(a: &mut App) {
                     || actual.left < r.left || actual.top < r.top || actual.right > r.right || actual.bottom > r.bottom
                     || client.right <= 0 || client.bottom <= 0
                     || geometry.occupied.iter().any(|&(left, right)| actual.left < right && actual.right > left)
-                    || layout::responsive_meter(client.right, client.bottom, dpi, &selected, a.config.ram_format == 2).font_px < scale_pixels(8, dpi, 96)
+                    || layout::responsive_meter(client.right, client.bottom, dpi, &selected, a.config.ram_format == 2, a.config.grid_columns).font_px < scale_pixels(8, dpi, 96)
                 {
                     a.blocked = true;
                     ShowWindow(meter, 0);
@@ -1240,7 +1286,7 @@ unsafe fn reconcile_extra_meters(a: &mut App) {
             continue;
         };
         let selected = selected_metrics(&a.config, &a.gpus);
-        if layout::responsive_meter(width, height, dpi, &selected, a.config.ram_format == 2).font_px < scale_pixels(8, dpi, 96) {
+        if layout::responsive_meter(width, height, dpi, &selected, a.config.ram_format == 2, a.config.grid_columns).font_px < scale_pixels(8, dpi, 96) {
             meter.blocked = true;
             unsafe { ShowWindow(meter.hwnd, 0); }
             continue;
@@ -1286,12 +1332,24 @@ fn panel_anchor(a: &App, owner: H) -> H {
     a.extra_meters.first().map(|m| m.hwnd).unwrap_or(null_mut())
 }
 
-fn details_extra_height(config: &settings::Settings) -> i32 {
-    24 * (i32::from(config.cpu_speed) + i32::from(config.disk_activity))
+fn gpu_status_lines(gpus: &[(String, String)], snapshot: &sampler::Snapshot) -> Vec<String> {
+    gpus.iter().enumerate().map(|(index, (id, name))| {
+        let value = snapshot.gpus.iter().find(|(gpu, _)| gpu.eq_ignore_ascii_case(id))
+            .and_then(|(_, value)| *value);
+        format!("GPU {} · {} · {}", index + 1, percentage(value), name)
+    }).collect()
 }
 
-fn details_content_height(config: &settings::Settings) -> i32 {
-    313 + details_extra_height(config) + config.visible.iter().zip(config.charts).filter(|(visible, chart)| **visible && *chart).count() as i32 * 40
+fn details_extra_height(config: &settings::Settings, gpu_count: usize) -> i32 {
+    24 * (i32::from(config.cpu_speed) + i32::from(config.disk_activity))
+        + 40 * gpu_count.max(1) as i32 - 24
+}
+
+fn details_content_height(config: &settings::Settings, gpu_count: usize) -> i32 {
+    313 + details_extra_height(config, gpu_count)
+        + config.visible.iter().zip(config.charts).enumerate()
+            .filter(|(_, (visible, chart))| **visible && *chart)
+            .map(|(i, _)| if i == 2 { 140 } else { 40 }).sum::<i32>()
 }
 
 fn position_details(a: &App, panel: H, owner: H) {
@@ -1305,44 +1363,86 @@ fn position_details(a: &App, panel: H, owner: H) {
             if GetWindowRect(owner, &mut meter) != 0 && GetWindowRect(panel, &mut rect) != 0 {
                 let work = Rect { left: display.work.left, top: display.work.top, right: display.work.right, bottom: display.work.bottom };
                 let width = (rect.right - rect.left).min((work.right - work.left).max(1));
-                let height = (details_content_height(&a.config) + 48).min((work.bottom - work.top).max(1));
+                let height = (details_content_height(&a.config, a.gpus.len()) + 48).min((work.bottom - work.top).max(1));
                 let (x, y) = layout::popup_position(
                     (meter.left, meter.top, meter.right, meter.bottom),
                     (width, height),
                     (work.left, work.top, work.right, work.bottom),
                 );
                 SetWindowPos(panel, null_mut(), x, y, width, height, 0x4 | 0x10);
-                let y = details_content_height(&a.config) - 40 - GetScrollPos(panel, 1);
+                let y = details_content_height(&a.config, a.gpus.len()) - 40 - GetScrollPos(panel, 1);
                 let dx = GetScrollPos(panel, 0);
                 SetWindowPos(get_child(panel, 501), null_mut(), 24 - dx, y, 0, 0, 0x15);
                 SetWindowPos(get_child(panel, 502), null_mut(), 146 - dx, y, 0, 0, 0x15);
-                SetWindowPos(get_child(panel, 620), null_mut(), 0, 0, 390, 68 + details_extra_height(&a.config), 0x16);
+                SetWindowPos(get_child(panel, 620), null_mut(), 0, 0, 390, 68 + details_extra_height(&a.config, a.gpus.len()), 0x16);
                 let mut client = Rect::default();
                 for _ in 0..2 {
                     GetClientRect(panel, &mut client);
                     SetScrollRange(panel, 0, 0, (430 - client.right).max(0), 1);
-                    SetScrollRange(panel, 1, 0, (details_content_height(&a.config) - client.bottom).max(0), 1);
+                    SetScrollRange(panel, 1, 0, (details_content_height(&a.config, a.gpus.len()) - client.bottom).max(0), 1);
                 }
             }
         }
     }
 }
+unsafe fn choice_dialog(a: &mut App, owner: H, title: &str, prompt: &str, labels: &[&str], menu: bool) -> i32 {
+    unsafe {
+        let (width, height) = if menu { (260, 265) } else { (410, 155) };
+        let mut anchor = Rect::default();
+        GetWindowRect(owner, &mut anchor);
+        let mut point = [anchor.left + 20, anchor.top + 20];
+        if menu { GetCursorPos(&mut point); }
+        let displays = displays::list();
+        if let Some(display) = displays::at_point(&displays, point) {
+            point[0] = point[0].clamp(display.work.left, (display.work.right - width).max(display.work.left));
+            point[1] = point[1].clamp(display.work.top, (display.work.bottom - height).max(display.work.top));
+        }
+        let dialog = CreateWindowExW(0x80, wide("MonitorPanel").as_ptr(), wide(title).as_ptr(),
+            0x80c80000, point[0], point[1], width, height, a.controller, null_mut(),
+            GetModuleHandleW(std::ptr::null()), null_mut());
+        if dialog.is_null() { return 0; }
+        SetWindowLongPtrW(dialog, -21, a as *mut App as isize);
+        a.choice = dialog;
+        a.choice_result = 0;
+        a.choice_menu = menu;
+        fluent(dialog, is_light(a.config.theme));
+        if !prompt.is_empty() { control(dialog, "STATIC", prompt, 0, 20, 14, 360, 28, 0); }
+        for (i, label) in labels.iter().enumerate() {
+            let (x, y, w) = if menu { (12, 8 + i as i32 * 39, 218) }
+                else { (15 + i as i32 * 125, 55, 115) };
+            control(dialog, "BUTTON", label, 301 + i, x, y, w, 32, 0x10000 | 0xb);
+        }
+        if !menu { EnableWindow(owner, 0); }
+        ShowWindow(dialog, 5);
+        SetForegroundWindow(dialog);
+        SetFocus(get_child(dialog, 301));
+        let mut message: Message = std::mem::zeroed();
+        while !a.choice.is_null() {
+            let status = GetMessageW(&mut message, null_mut(), 0, 0);
+            if status <= 0 {
+                if status == 0 { PostQuitMessage(message.wp as i32); }
+                break;
+            }
+            if message.msg == 0x100 && message.wp == 27 {
+                DestroyWindow(dialog);
+            } else if IsDialogMessageW(dialog, &mut message) == 0 {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+        if !a.choice.is_null() { DestroyWindow(dialog); }
+        if !menu { EnableWindow(owner, 1); SetForegroundWindow(owner); }
+        a.choice_result
+    }
+}
+
 fn show_menu(hwnd: H) {
     unsafe {
-        let menu = CreatePopupMenu();
-        for (id, label) in [
-            (1, "Open details"),
-            (2, "Settings"),
-            (3, "Show / hide meter"),
-            (4, "Exit"),
-        ] {
-            AppendMenuW(menu, 0, id, wide(label).as_ptr());
-        }
-        let mut p = [0, 0];
-        GetCursorPos(&mut p);
-        SetForegroundWindow(hwnd);
-        let cmd = TrackPopupMenu(menu, 0x100, p[0], p[1], 0, hwnd, std::ptr::null());
-        DestroyMenu(menu);
+        let locked = app(hwnd).config.locked;
+        let cmd = choice_dialog(app(hwnd), hwnd, "Kurmon", "", &[
+            "Open details", "Settings", "Show / hide meter", "Exit",
+            if locked { "Unlock position" } else { "Lock position" },
+        ], true);
         match cmd {
             1 => details(hwnd),
             2 => open_settings(hwnd),
@@ -1351,7 +1451,29 @@ fn show_menu(hwnd: H) {
                 place(app(hwnd));
                 reconcile_extra_meters(app(hwnd));
             }
-            4 => { DestroyWindow(hwnd); }
+            4 => {
+                let a = app(hwnd);
+                if !a.settings.is_null() {
+                    close_settings(a.settings);
+                    if !a.settings.is_null() { return; }
+                }
+                DestroyWindow(a.controller);
+            }
+            5 => {
+                let a = app(hwnd);
+                if !a.settings.is_null() {
+                    SendMessageW(get_child(a.settings, 112), 0x00f5, 0, 0);
+                } else {
+                    let mut next = a.config.clone();
+                    next.locked = !next.locked;
+                    match settings::load().and_then(|_| settings::save(&next)) {
+                        Ok(()) => apply_settings(a, next),
+                        Err(error) => {
+                            MessageBoxW(hwnd, wide(&error).as_ptr(), wide("Position was not saved").as_ptr(), 0x10);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1375,7 +1497,7 @@ fn details(hwnd: H) {
             100,
             500,
             470,
-            details_content_height(&a.config) + 48,
+            details_content_height(&a.config, a.gpus.len()) + 48,
             a.controller,
             null_mut(),
             GetModuleHandleW(std::ptr::null()),
@@ -1399,7 +1521,7 @@ fn details(hwnd: H) {
             "Settings",
             501,
             24,
-            details_content_height(&a.config) - 40,
+            details_content_height(&a.config, a.gpus.len()) - 40,
             110,
             32,
             0x10000 | 0xb,
@@ -1410,7 +1532,7 @@ fn details(hwnd: H) {
             "Task Manager",
             502,
             146,
-            details_content_height(&a.config) - 40,
+            details_content_height(&a.config, a.gpus.len()) - 40,
             130,
             32,
             0x10000 | 0xb,
@@ -1545,25 +1667,23 @@ fn open_settings(hwnd: H) {
                 SendMessageW(gpu, 0x14e, i, 0);
             }
         }
-        control(
-            h,
-            "STATIC",
-            "Reading order (comma-separated labels)",
-            0,
-            24,
-            375,
-            450,
-            22,
-            0,
-        );
+        control(h, "STATIC", "Reading", 0, 24, 375, 100, 22, 0);
+        let order_metric = control(h, "COMBOBOX", "", 127, 125, 370, 140, 160, 0x10000 | 3);
+        for label in ["CPU", "GPU", "RAM", "Download", "Upload"] {
+            SendMessageW(order_metric, 0x143, 0, wide(label).as_ptr() as isize);
+        }
+        SendMessageW(order_metric, 0x14e, 0, 0);
+        control(h, "BUTTON", "Move up", 203, 275, 370, 90, 26, 0x10000 | 0xb);
+        control(h, "BUTTON", "Move down", 204, 375, 370, 95, 26, 0x10000 | 0xb);
+        control(h, "STATIC", "Order", 0, 24, 405, 55, 22, 0);
         control(
             h,
             "EDIT",
             &a.config.order,
             106,
-            24,
+            80,
             400,
-            450,
+            394,
             26,
             0x10000 | 0x800000,
         );
@@ -1670,11 +1790,17 @@ fn open_settings(hwnd: H) {
         let cpu_speed = control(h, "BUTTON", "CPU frequency", 124, 270, 620, 200, 26, 0x10000 | 3);
         SendMessageW(cpu_speed, 0xf1, a.config.cpu_speed as usize, 0);
         control(h, "STATIC", "Meter color", 0, 24, 655, 90, 22, 0);
-        let palette = control(h, "COMBOBOX", "", 115, 120, 650, 250, 130, 0x10000 | 3);
+        let palette = control(h, "COMBOBOX", "", 115, 120, 650, 165, 130, 0x10000 | 3);
         for label in ["Blue", "Green", "Amber"] {
             SendMessageW(palette, 0x143, 0, wide(label).as_ptr() as isize);
         }
         SendMessageW(palette, 0x14e, a.config.palette as usize, 0);
+        control(h, "STATIC", "Columns", 0, 295, 655, 75, 22, 0);
+        let columns = control(h, "COMBOBOX", "", 126, 370, 650, 100, 220, 0x10000 | 3);
+        for label in ["Auto", "1", "2", "3", "4", "5", "6", "7", "8"] {
+            SendMessageW(columns, 0x143, 0, wide(label).as_ptr() as isize);
+        }
+        SendMessageW(columns, 0x14e, a.config.grid_columns as usize, 0);
         control(h, "STATIC", "Show metric labels", 0, 24, 685, 440, 22, 0);
         for (i, label) in ["CPU", "GPU", "RAM", "Download", "Upload"].iter().enumerate() {
             let check = control(
@@ -1714,6 +1840,8 @@ fn open_settings(hwnd: H) {
         GetClientRect(h, &mut client);
         SetScrollRange(h, 0, 0, (content_width - client.right).max(0), 1);
         SetScrollRange(h, 1, 0, (content_height - client.bottom).max(0), 1);
+        a.settings_original = Some(a.config.clone());
+        a.settings_dirty = false;
         ShowWindow(h, 5);
         SetForegroundWindow(h);
     }
@@ -1728,7 +1856,7 @@ unsafe fn scroll_settings_axis(hwnd: H, axis: i32, target: i32) {
     unsafe {
         let mut client = Rect::default();
         GetClientRect(hwnd, &mut client);
-        let (width, height) = if hwnd == app(hwnd).details { (430, details_content_height(&app(hwnd).config)) } else { settings_content_size(hwnd) };
+        let (width, height) = if hwnd == app(hwnd).details { (430, details_content_height(&app(hwnd).config, app(hwnd).gpus.len())) } else { settings_content_size(hwnd) };
         let max = if axis == 0 { width - client.right } else { height - client.bottom };
         let old = GetScrollPos(hwnd, axis);
         let target = target.clamp(0, max.max(0));
@@ -1743,6 +1871,68 @@ unsafe fn scroll_settings_axis(hwnd: H, axis: i32, target: i32) {
 unsafe fn scroll_settings(hwnd: H, target: i32) {
     unsafe { scroll_settings_axis(hwnd, 1, target); }
 }
+fn preview_candidate(mut next: settings::Settings, current: &settings::Settings) -> (settings::Settings, bool) {
+    let invalid = settings::Settings::parse(&next.serialize()).is_err();
+    if invalid {
+        if !next.visible.iter().any(|&visible| visible) {
+            next.visible = current.visible;
+        }
+        if settings::Settings::parse(&next.serialize()).is_err() {
+            next.order = current.order.clone();
+        }
+    }
+    (next, invalid)
+}
+
+unsafe fn apply_settings(a: &mut App, next: settings::Settings) {
+    unsafe {
+        let worker_changed = a.config.adapter != next.adapter || a.config.gpu != next.gpu
+            || a.config.gpu_temperature != next.gpu_temperature || a.config.interval != next.interval;
+        a.config = next;
+        if !a.details.is_null() {
+            position_details(a, a.details, a.details_owner);
+            fluent(a.details, is_light(a.config.theme));
+            InvalidateRect(a.details, std::ptr::null(), 1);
+        }
+        if !a.settings.is_null() {
+            fluent(a.settings, is_light(a.config.theme));
+            InvalidateRect(a.settings, std::ptr::null(), 1);
+        }
+        if !a.meter.is_null() { meter_transparency(a.meter, a.config.transparent, a.config.theme); }
+        for meter in &a.extra_meters {
+            meter_transparency(meter.hwnd, a.config.transparent, a.config.theme);
+            InvalidateRect(meter.hwnd, std::ptr::null(), 0);
+        }
+        if worker_changed { a.worker.configure(a.config.clone()); }
+        KillTimer(a.controller, 1);
+        SetTimer(a.controller, 1, a.config.interval * 1000, null_mut());
+        if !a.meter.is_null() { InvalidateRect(a.meter, std::ptr::null(), 0); }
+        invalidate_geometry(a);
+        place(a);
+        reconcile_extra_meters(a);
+    }
+}
+
+unsafe fn close_settings(hwnd: H) {
+    unsafe {
+        let a = app(hwnd);
+        if a.settings_dirty {
+            let answer = choice_dialog(a, hwnd, "Unsaved settings", "Save changes to settings?",
+                &["Save", "Discard", "Cancel"], false);
+            if answer == 1 {
+                SendMessageW(hwnd, 0x111, 201, 0);
+                return;
+            }
+            if answer != 2 { return; }
+        }
+        if let Some(original) = a.settings_original.take() {
+            apply_settings(a, original);
+        }
+        a.settings_dirty = false;
+        DestroyWindow(hwnd);
+    }
+}
+
 unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize {
     unsafe {
         if GetWindowLongPtrW(hwnd, -21) == 0 {
@@ -1831,7 +2021,9 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         }
                     }
                 }
-                let _ = settings::load().and_then(|_| settings::save(&a.config));
+                if a.settings_original.is_none() {
+                    let _ = settings::load().and_then(|_| settings::save(&a.config));
+                }
                 place(app(hwnd));
                 InvalidateRect(app(hwnd).meter, std::ptr::null(), 0);
                 0
@@ -1920,15 +2112,41 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                 0
             }
             0x111 => {
-                let id = wp & 0xffff;
+                let raw_id = wp & 0xffff;
+                let notification = (wp >> 16) & 0xffff;
                 let a = app(hwnd);
+                if hwnd == a.choice && (301..=305).contains(&raw_id) && notification == 0 {
+                    a.choice_result = (raw_id - 300) as i32;
+                    DestroyWindow(hwnd);
+                    return 0;
+                }
+                let preview = hwnd == a.settings && a.settings_original.is_some()
+                    && ((matches!(raw_id, 101..=105 | 108..=109 | 115 | 120..=121 | 126 | 135) && notification == 1)
+                        || (matches!(raw_id, 104 | 107 | 112 | 114 | 122..=125 | 130..=134 | 140..=144 | 150..=154) && notification == 0)
+                        || (raw_id == 106 && notification == 0x300));
+                if preview { a.settings_dirty = true; }
+                let id = if preview { 201 } else { raw_id };
                 match id {
                     501 => open_settings(a.controller),
                     502 => {
                         let _ = std::process::Command::new("taskmgr.exe").spawn();
                     }
+                    203 | 204 if hwnd == a.settings => {
+                        let selected = SendMessageW(get_child(hwnd, 127), 0x147, 0, 0);
+                        if let Some(name) = ["CPU", "GPU", "RAM", "Download", "Upload"].get(selected as usize) {
+                            let mut buffer = [0u16; 128];
+                            let count = GetWindowTextW(get_child(hwnd, 106), buffer.as_mut_ptr(), 128);
+                            let order = String::from_utf16_lossy(&buffer[..count as usize]);
+                            let mut parts: Vec<_> = order.split(',').collect();
+                            if let Some(index) = parts.iter().position(|part| part == name) {
+                                let target = if id == 203 { index.saturating_sub(1) } else { (index + 1).min(parts.len() - 1) };
+                                parts.swap(index, target);
+                                SetWindowTextW(get_child(hwnd, 106), wide(&parts.join(",")).as_ptr());
+                            }
+                        }
+                    }
                     202 => {
-                        DestroyWindow(hwnd);
+                        close_settings(hwnd);
                     }
                     201 => {
                         let mut next = a.config.clone();
@@ -1968,6 +2186,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         let index = SendMessageW(get_child(hwnd, 108), 0x147, 0, 0);
                         let displays: Vec<_> = displays::list().into_iter().filter(|display| !display.taskbar.is_null()).collect();
                         next.display = match index {
+                            0 if a.settings_original.as_ref().is_some_and(|s| s.display.is_empty()) => String::new(),
                             0 => layout::PRIMARY_DISPLAY.into(),
                             1 => layout::ALL_DISPLAYS.into(),
                             2 => layout::SECONDARY_DISPLAYS.into(),
@@ -1978,6 +2197,11 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         next.position = position_index - 1;
                         if next.position != 3 {
                             next.offset = -1;
+                        }
+                        else if let Some(original) = &a.settings_original {
+                            if original.position == 3 && a.config.position != 3 {
+                                next.offset = original.offset;
+                            }
                         }
                         next.locked = SendMessageW(get_child(hwnd, 112), 0xf0, 0, 0) == 1;
                         let mut face = [0u16; 128];
@@ -1990,54 +2214,35 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         next.transparent = SendMessageW(get_child(hwnd, 114), 0xf0, 0, 0) == 1;
                         next.palette =
                             SendMessageW(get_child(hwnd, 115), 0x147, 0, 0).clamp(0, 2) as u32;
+                        next.grid_columns = SendMessageW(get_child(hwnd, 126), 0x147, 0, 0).clamp(0, 8) as u32;
+                        let (next, invalid_preview) = if preview {
+                            preview_candidate(next, &a.config)
+                        } else {
+                            (next, false)
+                        };
                         let result = settings::Settings::parse(&next.serialize())
-                            .and_then(|_| if next.startup == a.config.startup {
+                            .and_then(|_| if preview {
+                                Ok(())
+                            } else if next.startup == a.settings_original.as_ref().map(|s| s.startup).unwrap_or(a.config.startup) {
                                 settings::load().and_then(|_| settings::save(&next))
                             } else {
                                 save_with_startup(&next)
                             });
                         match result {
                             Ok(()) => {
-                                let face = wide(&next.font);
-                                let small = CreateFontW(
-                                    -16,
-                                    0,
-                                    0,
-                                    0,
-                                    400,
-                                    0,
-                                    0,
-                                    0,
-                                    1,
-                                    0,
-                                    0,
-                                    5,
-                                    0,
-                                    face.as_ptr(),
-                                );
-                                if !small.is_null() {
-                                    if a.small != a.font {
-                                        DeleteObject(a.small);
-                                    }
-                                    a.small = small;
+                                if preview {
+                                    let original = a.settings_original.as_ref().unwrap();
+                                    a.settings_dirty = invalid_preview || next.serialize() != original.serialize();
                                 }
-                                a.config = next;
-                                if !a.details.is_null() { position_details(a, a.details, a.details_owner); }
-                                meter_transparency(a.meter, a.config.transparent, a.config.theme);
-                                for meter in &a.extra_meters {
-                                    meter_transparency(meter.hwnd, a.config.transparent, a.config.theme);
-                                    InvalidateRect(meter.hwnd, std::ptr::null(), 0);
+                                apply_settings(a, next);
+                                if !preview {
+                                    a.settings_original = None;
+                                    a.settings_dirty = false;
+                                    DestroyWindow(hwnd);
                                 }
-                                a.worker.configure(a.config.clone());
-                                KillTimer(a.controller, 1);
-                                SetTimer(a.controller, 1, a.config.interval * 1000, null_mut());
-                                InvalidateRect(a.meter, std::ptr::null(), 0);
-                                invalidate_geometry(a);
-                                place(a);
-                                reconcile_extra_meters(a);
-                                DestroyWindow(hwnd);
                             }
                             Err(e) => {
+                                if preview { return 0; }
                                 MessageBoxW(
                                     hwnd,
                                     wide(&e).as_ptr(),
@@ -2092,7 +2297,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     let old_pen = SelectObject(dc, border);
                     let dy = GetScrollPos(hwnd, 1);
                     RoundRect(dc, 12, 40 - dy, 430, 186 - dy, 10, 10);
-                    RoundRect(dc, 12, 190 - dy, 430, 264 + details_extra_height(&a.config) - dy, 10, 10);
+                    RoundRect(dc, 12, 190 - dy, 430, 264 + details_extra_height(&a.config, a.gpus.len()) - dy, 10, 10);
                     SelectObject(dc, old_brush);
                     SelectObject(dc, old_pen);
                     DeleteObject(surface);
@@ -2108,7 +2313,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     let mut client = Rect::default();
                     GetClientRect(hwnd, &mut client);
                     let meter_dpi = a.extra_meters.iter().find(|meter| meter.hwnd == hwnd).map(|meter| meter.dpi).unwrap_or(a.meter_dpi);
-                    let meter_layout = layout::responsive_meter(client.right, client.bottom, meter_dpi, &selected, a.config.ram_format == 2);
+                    let meter_layout = layout::responsive_meter(client.right, client.bottom, meter_dpi, &selected, a.config.ram_format == 2, a.config.grid_columns);
                     let muted = if light { rgb(0x55, 0x55, 0x55) } else { rgb(0xb8, 0xb8, 0xb8) };
                     let accent = match (a.config.palette, light) {
                         (1, false) => rgb(0x6c, 0xcb, 0x8a),
@@ -2264,10 +2469,17 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     for (i, value) in values.iter().enumerate() {
                         SetWindowTextW(get_child(hwnd, 610 + i as i32), wide(value).as_ptr());
                     }
-                    let gpu = a.gpus.iter().find(|(id, _)| id.eq_ignore_ascii_case(&s.gpu_id))
-                        .map(|(_, name)| name.as_str()).unwrap_or("Unavailable / selected GPU missing");
                     let notice = if a.blocked { "Meter hidden: insufficient taskbar space" } else { a.notice.as_str() };
-                    let mut status = format!("{name} · {}\nGPU: {gpu}", s.network_status);
+                    let gpu_lines = gpu_status_lines(&a.gpus, s);
+                    let mut status = format!("{name} · {}", s.network_status);
+                    if gpu_lines.is_empty() {
+                        status.push_str("\nGPU: unavailable");
+                    } else {
+                        for line in gpu_lines {
+                            status.push('\n');
+                            status.push_str(&line);
+                        }
+                    }
                     if a.config.cpu_speed { status.push_str(&format!("\nCPU frequency: {}", cpu_clock(s.cpu_mhz))); }
                     if a.config.disk_activity { status.push_str(&format!("\nDisk: read {} · write {}", rate(s.disk_read, false), rate(s.disk_write, false))); }
                     if !notice.is_empty() { status.push_str(&format!("\n{notice}")); }
@@ -2275,15 +2487,20 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     let dx = GetScrollPos(hwnd, 0);
                     let dy = GetScrollPos(hwnd, 1);
                     let names = ["CPU", "GPU", "RAM", "Download", "Upload"];
-                    let mut row = 0;
+                    let mut chart_offset = 0;
                     for i in 0..5 {
                         if a.config.visible[i] && a.config.charts[i] {
-                            let top = 265 + details_extra_height(&a.config) + row * 40 - dy;
-                            let mut label = Rect { left: 24 - dx, top, right: 115 - dx, bottom: top + 30 };
+                            let top = 265 + details_extra_height(&a.config, a.gpus.len()) + chart_offset - dy;
+                            let mut label = Rect { left: 24 - dx, top, right: 115 - dx, bottom: top + 24 };
                             SetTextColor(dc, fg);
                             DrawTextW(dc, wide(names[i]).as_ptr(), -1, &mut label, 0x824);
-                            draw_history(dc, &a.history, i, Rect { left: 120 - dx, top, right: 410 - dx, bottom: top + 30 }, if light { rgb(0x0f, 0x6c, 0xbd) } else { rgb(0x4c, 0xc2, 0xff) });
-                            row += 1;
+                            if i == 2 {
+                                draw_ram_history(dc, &a.history, Rect { left: 24 - dx, top: top + 24, right: 410 - dx, bottom: top + 132 }, light);
+                                chart_offset += 140;
+                            } else {
+                                draw_history(dc, &a.history, i, Rect { left: 120 - dx, top, right: 410 - dx, bottom: top + 30 }, if light { rgb(0x0f, 0x6c, 0xbd) } else { rgb(0x4c, 0xc2, 0xff) });
+                                chart_offset += 40;
+                            }
                         }
                     }
                 }
@@ -2299,24 +2516,34 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
             0x100 if wp == 27 => {
-                if hwnd != app(hwnd).meter {
+                if hwnd == app(hwnd).settings {
+                    close_settings(hwnd);
+                } else if hwnd != app(hwnd).meter {
                     DestroyWindow(hwnd);
                 }
                 0
             }
             0x6 => {
                 let a = app(hwnd);
+                if hwnd == a.choice && a.choice_menu && wp & 0xffff == 0 {
+                    DestroyWindow(hwnd);
+                    return 0;
+                }
                 if wp & 0xffff == 0 && hwnd == a.details && lp as H != a.settings {
                     ShowWindow(hwnd, 0);
                 }
                 0
             }
             0x10 => {
-                DestroyWindow(hwnd);
+                if hwnd == app(hwnd).settings { close_settings(hwnd); } else { DestroyWindow(hwnd); }
                 0
             }
             0x2 => {
                 let a = app(hwnd);
+                if hwnd == a.choice {
+                    a.choice = null_mut();
+                    return 0;
+                }
                 if hwnd == a.controller {
                     if !a.meter.is_null() {
                         DestroyWindow(a.meter);
@@ -2498,6 +2725,11 @@ fn main() {
             details: null_mut(),
             details_owner: null_mut(),
             settings: null_mut(),
+            settings_original: None,
+            settings_dirty: false,
+            choice: null_mut(),
+            choice_result: 0,
+            choice_menu: false,
             controller: null_mut(),
             meter: null_mut(),
             parent: null_mut(),
@@ -2550,7 +2782,7 @@ fn main() {
                     a.details
                 };
                 if !panel.is_null() {
-                    DestroyWindow(panel);
+                    SendMessageW(panel, 0x10, 0, 0);
                     continue;
                 }
             }
@@ -2621,6 +2853,18 @@ fn main() {
 mod transaction_tests {
     use super::commit_startup;
     use std::cell::RefCell;
+
+    #[test]
+    fn invalid_edit_preserves_valid_preview_changes() {
+        let original = super::settings::Settings::default();
+        let mut next = original.clone();
+        next.order = "CPU,".into();
+        next.palette = 2;
+        let (preview, invalid) = super::preview_candidate(next, &original);
+        assert!(invalid);
+        assert_eq!(preview.order, original.order);
+        assert_eq!(preview.palette, 2);
+    }
 
     #[test]
     fn all_gpus_keeps_distinct_adapters_with_identical_names() {
@@ -2702,5 +2946,32 @@ mod transaction_tests {
         assert!(super::accept_snapshot(&settings, &mut current, next));
         assert_eq!(current.cpu, Some(42.0));
         assert_eq!(current.ram, Some(73.0));
+    }
+
+    #[test]
+    fn overview_lists_each_gpu_name_with_its_live_value() {
+        let gpus = vec![
+            ("intel".into(), "Intel Iris Xe Graphics".into()),
+            ("nvidia".into(), "NVIDIA GeForce RTX 4060".into()),
+        ];
+        let mut snapshot = super::sampler::Snapshot::default();
+        snapshot.gpus = vec![("intel".into(), Some(12.0)), ("nvidia".into(), Some(34.0))];
+        assert_eq!(
+            super::gpu_status_lines(&gpus, &snapshot),
+            [
+                "GPU 1 · 12% · Intel Iris Xe Graphics",
+                "GPU 2 · 34% · NVIDIA GeForce RTX 4060",
+            ]
+        );
+    }
+
+    #[test]
+    fn ram_chart_gets_extra_space_only_when_enabled_and_visible() {
+        let mut config = super::settings::Settings::default();
+        let baseline = super::details_content_height(&config, 2);
+        config.charts[2] = true;
+        assert_eq!(super::details_content_height(&config, 2) - baseline, 140);
+        config.visible[2] = false;
+        assert_eq!(super::details_content_height(&config, 2), baseline);
     }
 }

@@ -11,6 +11,7 @@
 - The font-dependent experimental metric symbols were removed after they rendered ambiguously. Existing `icon_style` preferences are accepted once for migration but omitted from subsequent saves; the meter uses readable metric labels.
 - The worker-to-UI snapshot handoff now replaces the displayed snapshot on every accepted sample. A regression test covers the state transition; the installed build was observed showing live CPU, three GPU, RAM, download, and upload values after restart.
 - The meter now uses DPI-scaled GDI vector icons, muted labels, semibold values, and width fitting that accounts for icon and bold-text width. The overview groups summary and source status in neutral cards; the settings panel retains native named controls and keyboard behavior.
+- A right-click delivered to the hosted taskbar meter opened the Kurmon context window with its position-lock action visible. A regression test covers selecting a monitor when the click is in the taskbar rather than the work area; secondary taskbars were not exercised for this fix.
 
 - The installed running executable reports FileDescription and ProductName `Kurmon` through Windows file-version metadata. The Task Manager window was not readable through the desktop capture during verification, so its displayed search result remains unverified.
 

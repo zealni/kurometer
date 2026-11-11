@@ -3,7 +3,7 @@ pub struct MeterLayout {
     pub font_px: i32,
 }
 
-pub fn responsive_meter(width: i32, height: i32, dpi: u32, metrics: &[usize], ram_both: bool) -> MeterLayout {
+pub fn responsive_meter(width: i32, height: i32, dpi: u32, metrics: &[usize], ram_both: bool, requested_columns: u32) -> MeterLayout {
     let mut layout = MeterLayout { cells: vec![(0, 0, 0, 0); metrics.len()], font_px: 0 };
     if width <= 0 || height <= 0 || metrics.is_empty() {
         return layout;
@@ -19,6 +19,7 @@ pub fn responsive_meter(width: i32, height: i32, dpi: u32, metrics: &[usize], ra
     let mut best_columns = 0;
     let mut best_font = 0;
     for columns in 1..=count {
+        if requested_columns != 0 && columns != (requested_columns as usize).min(count) { continue; }
         let rows = (count + columns - 1) / columns;
         let cell_width = available_width / columns as i32;
         let cell_height = available_height / rows as i32;
@@ -157,7 +158,7 @@ mod tests {
                 for width in [260, 340, 480, 800, 1200] {
                     for count in 1..=5 {
                         for ram_both in [false, true] {
-                            let layout = responsive_meter(width, height, dpi, &metrics[..count], ram_both);
+                            let layout = responsive_meter(width, height, dpi, &metrics[..count], ram_both, 0);
                             assert!(layout.font_px > 0);
                             for (slot, &(left, top, right, bottom)) in layout.cells[..count].iter().enumerate() {
                                 assert!(0 <= left && left < right && right <= width);
@@ -179,7 +180,7 @@ mod tests {
         for mask in 1..32 {
             let metrics: Vec<_> = (0..5).filter(|i| mask & (1 << i) != 0).collect();
             for (width, height, dpi) in [(260, 24, 96), (571, 44, 120), (900, 72, 192)] {
-                let layout = responsive_meter(width, height, dpi, &metrics, true);
+                let layout = responsive_meter(width, height, dpi, &metrics, true, 0);
                 for &(left, top, right, bottom) in &layout.cells[..metrics.len()] {
                     assert!(left >= 0 && top >= 0 && right <= width && bottom <= height);
                     assert!(left < right && top < bottom);
@@ -191,22 +192,30 @@ mod tests {
     #[test]
     fn responsive_layout_uses_height_and_width_to_choose_rows() {
         let metrics = [0, 1, 2, 3, 4];
-        let short = responsive_meter(260, 24, 96, &metrics, false);
-        let tall = responsive_meter(260, 72, 96, &metrics, false);
-        let wide = responsive_meter(1200, 72, 96, &metrics, false);
+        let short = responsive_meter(260, 24, 96, &metrics, false, 0);
+        let tall = responsive_meter(260, 72, 96, &metrics, false, 0);
+        let wide = responsive_meter(1200, 72, 96, &metrics, false, 0);
         assert!(short.cells.iter().all(|cell| cell.1 == short.cells[0].1));
         assert!(tall.cells.iter().any(|cell| cell.1 > tall.cells[0].1));
         assert!(wide.cells.iter().all(|cell| cell.1 == wide.cells[0].1));
     }
 
     #[test]
+    fn requested_columns_control_grid_placement() {
+        let layout = responsive_meter(600, 80, 96, &[0, 1, 2, 3], false, 2);
+        assert_eq!(layout.cells[0].1, layout.cells[1].1);
+        assert!(layout.cells[2].1 > layout.cells[0].1);
+        assert!(layout.cells[1].0 > layout.cells[0].0);
+    }
+
+    #[test]
     fn responsive_layout_rejects_unusable_dimensions() {
         for (width, height) in [(0, 40), (260, 0), (-1, 40), (260, -1), (1, 1)] {
-            let layout = responsive_meter(width, height, 96, &[0, 1, 2, 3, 4], true);
+            let layout = responsive_meter(width, height, 96, &[0, 1, 2, 3, 4], true, 0);
             assert_eq!(layout.font_px, 0);
             assert_eq!(layout.cells, vec![(0, 0, 0, 0); 5]);
         }
-        let empty = responsive_meter(260, 40, 96, &[], false);
+        let empty = responsive_meter(260, 40, 96, &[], false, 0);
         assert_eq!(empty.font_px, 0);
         assert!(empty.cells.is_empty());
     }

@@ -24,6 +24,7 @@ pub struct Settings {
     pub font_size: u32,
     pub transparent: bool,
     pub palette: u32,
+    pub grid_columns: u32,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -52,6 +53,7 @@ impl Default for Settings {
             font_size: 0,
             transparent: false,
             palette: 0,
+            grid_columns: 0,
         }
     }
 }
@@ -179,6 +181,10 @@ impl Settings {
                         return Err("Invalid palette".into());
                     }
                 }
+                "grid_columns" => {
+                    s.grid_columns = value.parse().map_err(|_| "Invalid grid columns")?;
+                    if s.grid_columns > 8 { return Err("Invalid grid columns".into()); }
+                }
                 _ => return Err(format!("Unknown setting: {key}")),
             }
         }
@@ -186,7 +192,7 @@ impl Settings {
     }
     pub fn serialize(&self) -> String {
         format!(
-            "adapter={}\ngpu={}\nall_gpus={}\ngpu_temperature={}\ncpu_speed={}\ndisk_activity={}\ninterval={}\nbits={}\ntheme={}\nvisible={}\nlabels={}\ncharts={}\nram_format={}\norder={}\nstartup={}\ndisplay={}\nwidth={}\nposition={}\nlocked={}\noffset={}\nfont={}\nfont_size={}\ntransparent={}\npalette={}\n",
+            "adapter={}\ngpu={}\nall_gpus={}\ngpu_temperature={}\ncpu_speed={}\ndisk_activity={}\ninterval={}\nbits={}\ntheme={}\nvisible={}\nlabels={}\ncharts={}\nram_format={}\norder={}\nstartup={}\ndisplay={}\nwidth={}\nposition={}\nlocked={}\noffset={}\nfont={}\nfont_size={}\ntransparent={}\npalette={}\ngrid_columns={}\n",
             self.adapter,
             self.gpu,
             self.all_gpus,
@@ -214,6 +220,7 @@ impl Settings {
             self.font_size,
             self.transparent,
             self.palette,
+            self.grid_columns,
         )
     }
 }
@@ -285,6 +292,12 @@ mod tests {
         assert!(Settings::parse("charts=10102\n").is_err());
     }
     #[test]
+    fn grid_columns_are_persisted_and_validated() {
+        let settings = Settings::parse("grid_columns=3\n").unwrap();
+        assert_eq!(Settings::parse(&settings.serialize()).unwrap().grid_columns, 3);
+        assert!(Settings::parse("grid_columns=9\n").is_err());
+    }
+    #[test]
     fn meter_formats_round_trip_and_reject_invalid_values() {
         let parsed = Settings::parse("labels=10101\nram_format=2\n").unwrap();
         assert_eq!(parsed.labels, [true, false, true, false, true]);
@@ -319,6 +332,7 @@ mod tests {
             font_size: 0,
             transparent: true,
             palette: 2,
+            grid_columns: 3,
         };
         let parsed = Settings::parse(&original.serialize()).unwrap();
         assert_eq!(parsed.adapter, 42);

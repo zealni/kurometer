@@ -56,3 +56,24 @@ pub fn selected(id: &str) -> Option<Display> {
     if id.is_empty() || id == crate::layout::PRIMARY_DISPLAY { displays.iter().find(|display| display.primary).cloned() }
     else { displays.iter().find(|display| display.id == id).cloned() }
 }
+
+pub fn at_point(displays: &[Display], point: [i32; 2]) -> Option<&Display> {
+    displays.iter().find(|d| point[0] >= d.screen.left && point[0] < d.screen.right
+        && point[1] >= d.screen.top && point[1] < d.screen.bottom)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn taskbar_click_finds_display_outside_its_work_area() {
+        let display = Display {
+            id: "primary".into(), taskbar: std::ptr::null_mut(),
+            screen: Rect { left: 0, top: 0, right: 1920, bottom: 1080 },
+            work: Rect { left: 0, top: 0, right: 1920, bottom: 1032 },
+            primary: true,
+        };
+        assert_eq!(at_point(&[display], [100, 1050]).unwrap().work.bottom, 1032);
+    }
+}
