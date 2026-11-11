@@ -9,11 +9,11 @@ Kurmon (Kuro Monitor) is a native Rust and Win32 system monitor for the Windows 
 On Windows x64, install the Rust MSVC toolchain, Windows C++ build tools, and Windows SDK (including the resource compiler). From the repository root, run:
 
 ```powershell
-cargo build --release --bin taskbar-system-monitor
-.\target\release\taskbar-system-monitor.exe
+cargo build --release --bin Kurmon
+./target/release/Kurmon.exe
 ```
 
-The executable retains its existing name to preserve compatibility. Its Windows file description is **Kurmon**, which identifies it in Task Manager; the Details tab still shows `taskbar-system-monitor.exe`. Launching it again opens the existing instance. Avoid enabling startup for a temporary build path that you may later move.
+The executable is named **Kurmon.exe**. Its Windows product and file description are also Kurmon. Launching it again opens the existing instance. Avoid enabling startup for a temporary build path that you may later move.
 
 ## Controls and settings
 
@@ -21,9 +21,9 @@ Left-click the meter or its notification-area icon to open the details panel. Ri
 
 With a transparent background, the meter's whole reserved area accepts clicks. Taskbar controls outside that area remain accessible.
 
-Settings include the network and GPU adapters, refresh interval, bits or bytes, theme, font, transparent background, color palette, meter width and positioning, position lock, visible readings and their order, and optional sign-in startup. Display selection offers the primary taskbar, all taskbar-backed displays, secondary taskbar-backed displays only, or one named display. Settings opens as a scrollable panel near the selected taskbar. In the fallback overlay mode, positioning unlocked allows moving the meter and dragging its right edge to resize it; while hosted by the taskbar those gestures are unavailable, so use Settings.
+Settings include the network and GPU adapters, refresh interval, bits or bytes, appearance theme, font, transparent background, color palette, meter width and positioning, position lock, visible readings and their order, and optional sign-in startup. Display selection offers the primary taskbar, all taskbar-backed displays, secondary taskbar-backed displays only, or one named display. Settings opens as a scrollable panel near the selected taskbar. In the fallback overlay mode, positioning unlocked allows moving the meter and dragging its right edge to resize it; while hosted by the taskbar those gestures are unavailable, so use Settings.
 
-Choose which metrics, labels, and history charts appear individually. RAM can show percentage, used GiB, or both (for example, `72% · 11.4 GiB`). CPU, GPU, and RAM readings turn red at 95% or above. The font selector offers common installed fonts and preserves an existing preference; the size selector sets a maximum that shrinks uniformly when needed to fit. Settings groups reading sources and taskbar display controls in two columns when the screen is wide enough and scrolls on smaller displays. The overview aligns readings and values in separate columns.
+Choose which metrics, labels, and history charts appear individually. The meter draws its CPU, GPU, RAM, download, and upload icons directly, so they stay sharp without depending on an icon font. RAM can show percentage, used GiB, or both (for example, `72% · 11.4 GiB`). CPU, GPU, and RAM readings turn red at 95% or above. The font selector offers common installed fonts and preserves an existing preference; the size selector sets a maximum that shrinks uniformly when needed to fit. Settings groups reading sources and taskbar display controls in two columns when the screen is wide enough and scrolls on smaller displays. The overview aligns readings and values in separate columns.
 
 Enable **Show all GPUs** to add a separate meter for each detected adapter. **GPU temperature** uses the installed NVIDIA CUDA and NVML drivers when available; unsupported or inaccessible sensors show `--°C`. CPU and non-NVIDIA GPU temperatures are not provided. Additional GPU meters do not have separate history charts.
 
@@ -41,7 +41,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 The package contains the release executable; Rust is not needed to install it. The installer copies the executable and uninstall script to `%LOCALAPPDATA%\Programs\TaskbarSystemMonitor` and creates a Kurmon Start menu shortcut. It does not enable startup. Exit the installed application before updating or uninstalling. An existing Kurmon shortcut pointing elsewhere is not overwritten. Older Taskbar System Monitor shortcuts are left untouched.
 
-From a source checkout, build first with `cargo build --release --bin taskbar-system-monitor`, then run `powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1`.
+From a source checkout, build first with `cargo build --release --bin Kurmon`, then run `powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1`.
 
 To uninstall while retaining preferences, or to remove them explicitly:
 

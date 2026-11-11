@@ -34,12 +34,12 @@ fn main() {
             .expect("failed to run Windows resource compiler");
         assert!(status.success(), "Windows resource compiler failed");
         println!(
-            "cargo:rustc-link-arg-bin=taskbar-system-monitor={}",
+            "cargo:rustc-link-arg-bin=Kurmon={}",
             resource.display()
         );
-        println!("cargo:rustc-link-arg-bin=taskbar-system-monitor=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg-bin=Kurmon=/MANIFEST:EMBED");
         println!(
-            "cargo:rustc-link-arg-bin=taskbar-system-monitor=/MANIFESTINPUT:{}",
+            "cargo:rustc-link-arg-bin=Kurmon=/MANIFESTINPUT:{}",
             manifest.display()
         );
     }

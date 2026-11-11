@@ -219,6 +219,8 @@ unsafe extern "system" {
     fn CreatePen(style: i32, width: i32, color: u32) -> H;
     fn MoveToEx(dc: H, x: i32, y: i32, old: *mut [i32; 2]) -> i32;
     fn LineTo(dc: H, x: i32, y: i32) -> i32;
+    fn Ellipse(dc: H, left: i32, top: i32, right: i32, bottom: i32) -> i32;
+    fn GetStockObject(index: i32) -> H;
     fn EnumFontFamiliesExW(dc: H, font: *const LogFont, callback: Option<unsafe extern "system" fn(*const LogFont, *const c_void, u32, isize) -> i32>, data: isize, flags: u32) -> i32;
     fn SetTextColor(dc: H, color: u32) -> u32;
     fn SetBkMode(dc: H, mode: i32) -> i32;
@@ -322,6 +324,76 @@ fn draw_history(dc: H, history: &history::History, index: usize, rect: Rect, col
         DeleteObject(pen);
     }
 }
+fn draw_metric_icon(dc: H, metric: usize, rect: Rect, color: u32, dpi: u32) -> i32 {
+    let size = scale_pixels(12, dpi, 96).min((rect.bottom - rect.top - 4).max(0));
+    if size < 6 {
+        return 0;
+    }
+    let left = rect.left + scale_pixels(2, dpi, 96);
+    let top = rect.top + (rect.bottom - rect.top - size) / 2;
+    let right = left + size;
+    let bottom = top + size;
+    unsafe {
+        let pen = CreatePen(0, scale_pixels(1, dpi, 96), color);
+        if pen.is_null() {
+            return 0;
+        }
+        let old_pen = SelectObject(dc, pen);
+        let old_brush = SelectObject(dc, GetStockObject(5));
+        let path = |points: &[(i32, i32)]| {
+            if let Some(&(x, y)) = points.first() {
+                MoveToEx(dc, x, y, null_mut());
+                for &(x, y) in &points[1..] {
+                    LineTo(dc, x, y);
+                }
+            }
+        };
+        match metric {
+            0 => {
+                let inset = size / 4;
+                path(&[
+                    (left + inset, top + inset), (right - inset, top + inset),
+                    (right - inset, bottom - inset), (left + inset, bottom - inset),
+                    (left + inset, top + inset),
+                ]);
+                for offset in [size / 3, size * 2 / 3] {
+                    path(&[(left, top + offset), (left + inset, top + offset)]);
+                    path(&[(right - inset, top + offset), (right, top + offset)]);
+                    path(&[(left + offset, top), (left + offset, top + inset)]);
+                    path(&[(left + offset, bottom - inset), (left + offset, bottom)]);
+                }
+            }
+            1 | 5..DISK_WRITE => {
+                path(&[(left, top + 1), (right, top + 1), (right, bottom - 3), (left, bottom - 3), (left, top + 1)]);
+                path(&[(left + size / 2, bottom - 3), (left + size / 2, bottom), (right - 2, bottom)]);
+            }
+            2 => {
+                path(&[(left, top + 1), (right, top + 1), (right, bottom - 1), (left, bottom - 1), (left, top + 1)]);
+                for x in [left + size / 3, left + size * 2 / 3] {
+                    path(&[(x, top + size / 4), (x, bottom - size / 4)]);
+                }
+            }
+            3 | DISK_READ => {
+                path(&[(left + size / 2, top), (left + size / 2, bottom - 2)]);
+                path(&[(left + 2, bottom - size / 3), (left + size / 2, bottom - 1), (right - 2, bottom - size / 3)]);
+            }
+            4 | DISK_WRITE => {
+                path(&[(left + size / 2, bottom), (left + size / 2, top + 2)]);
+                path(&[(left + 2, top + size / 3), (left + size / 2, top + 1), (right - 2, top + size / 3)]);
+            }
+            CPU_CLOCK => {
+                Ellipse(dc, left, top, right, bottom);
+                path(&[(left + size / 2, top + 2), (left + size / 2, top + size / 2), (right - 2, top + size / 2)]);
+            }
+            _ => {}
+        }
+        SelectObject(dc, old_brush);
+        SelectObject(dc, old_pen);
+        DeleteObject(pen);
+    }
+    size + scale_pixels(6, dpi, 96)
+}
+
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
@@ -592,6 +664,29 @@ fn rate(v: Option<f64>, bits: bool) -> String {
     }
     format!("{v:.1} {}", units[unit])
 }
+fn accept_snapshot(
+    config: &settings::Settings,
+    current: &mut sampler::Snapshot,
+    next: sampler::Snapshot,
+) -> bool {
+    let changed = percentage(next.cpu) != percentage(current.cpu)
+        || percentage(next.gpu) != percentage(current.gpu)
+        || percentage(next.ram) != percentage(current.ram)
+        || (config.ram_format != 0
+            && format!("{:.1}", next.used as f64 / 1073741824.0)
+                != format!("{:.1}", current.used as f64 / 1073741824.0))
+        || rate(next.download, config.bits) != rate(current.download, config.bits)
+        || rate(next.upload, config.bits) != rate(current.upload, config.bits)
+        || (config.all_gpus && next.gpus != current.gpus)
+        || (config.gpu_temperature && next.gpu_temperatures != current.gpu_temperatures)
+        || (config.cpu_speed && cpu_clock(next.cpu_mhz) != cpu_clock(current.cpu_mhz))
+        || (config.disk_activity
+            && (rate(next.disk_read, false) != rate(current.disk_read, false)
+                || rate(next.disk_write, false) != rate(current.disk_write, false)));
+    *current = next;
+    changed
+}
+
 #[repr(C)]
 struct DrawItem {
     kind: u32,
@@ -1294,7 +1389,8 @@ fn details(hwnd: H) {
         for (i, label) in ["CPU busy time", "GPU busiest engine", "RAM", "Download", "Upload"].iter().enumerate() {
             let y = 48 + i as i32 * 27;
             control(h, "STATIC", label, 0, 24, y, 190, 22, 0);
-            control(h, "STATIC", "--", 610 + i, 220, y, 190, 22, 0);
+            let value = control(h, "STATIC", "--", 610 + i, 220, y - 2, 190, 26, 0);
+            SendMessageW(value, 0x30, a.heading as usize, 1);
         }
         control(h, "STATIC", "", 620, 24, 192, 390, 68, 0);
         control(
@@ -1595,13 +1691,18 @@ fn open_settings(hwnd: H) {
         }
         SendMessageW(ram_format, 0x14e, a.config.ram_format as usize, 0);
         control(h, "STATIC", "Show history charts", 0, 24, 815, 440, 22, 0);
+        let wide_layout = settings_content_size(h).0 == 960;
         for (i, label) in ["CPU chart", "GPU chart", "RAM chart", "Download chart", "Upload chart"].iter().enumerate() {
-            let check = control(h, "BUTTON", label, 150 + i,
-                24 + (i as i32 % 3) * 145, 840 + (i as i32 / 3) * 30,
-                140, 26, 0x10000 | 3);
+            let (x, y, width) = if wide_layout {
+                (24 + (i as i32 % 2) * 220, 840 + (i as i32 / 2) * 30, 210)
+            } else {
+                (24 + (i as i32 % 3) * 145, 840 + (i as i32 / 3) * 30, 140)
+            };
+            let check = control(h, "BUTTON", label, 150 + i, x, y, width, 26, 0x10000 | 3);
             SendMessageW(check, 0xf1, a.config.charts[i] as usize, 0);
         }
-        let disk = control(h, "BUTTON", "Disk read/write", 125, 314, 870, 160, 26, 0x10000 | 3);
+        let (disk_x, disk_y, disk_width) = if wide_layout { (244, 900, 210) } else { (314, 870, 160) };
+        let disk = control(h, "BUTTON", "Disk read/write", 125, disk_x, disk_y, disk_width, 26, 0x10000 | 3);
         SendMessageW(disk, 0xf1, a.config.disk_activity as usize, 0);
         control(h, "BUTTON", "Save settings", 201, 24, 910, 160, 36, 0x10000 | 0xb);
         control(h, "BUTTON", "Cancel", 202, 200, 910, 110, 36, 0x10000 | 0xb);
@@ -1790,19 +1891,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     a.history.push(&next);
                     a.history_stamp = Some(stamp);
                 }
-                let changed = percentage(next.cpu) != percentage(a.snapshot.cpu)
-                    || percentage(next.gpu) != percentage(a.snapshot.gpu)
-                    || percentage(next.ram) != percentage(a.snapshot.ram)
-                    || (a.config.ram_format != 0 && format!("{:.1}", next.used as f64 / 1073741824.0) != format!("{:.1}", a.snapshot.used as f64 / 1073741824.0))
-                    || rate(next.download, a.config.bits)
-                        != rate(a.snapshot.download, a.config.bits)
-                    || rate(next.upload, a.config.bits) != rate(a.snapshot.upload, a.config.bits)
-                    || (a.config.all_gpus && next.gpus != a.snapshot.gpus)
-                    || (a.config.gpu_temperature && next.gpu_temperatures != a.snapshot.gpu_temperatures)
-                    || (a.config.cpu_speed && cpu_clock(next.cpu_mhz) != cpu_clock(a.snapshot.cpu_mhz))
-                    || (a.config.disk_activity && (rate(next.disk_read, false) != rate(a.snapshot.disk_read, false)
-                        || rate(next.disk_write, false) != rate(a.snapshot.disk_write, false)))
-                    ;
+                let changed = accept_snapshot(&a.config, &mut a.snapshot, next);
                 if changed || (new_sample && a.config.charts.iter().any(|&v| v)) {
                     if a.visible && !a.blocked && !a.meter.is_null() { InvalidateRect(a.meter, std::ptr::null(), 0); }
                     for meter in &a.extra_meters {
@@ -1977,8 +2066,8 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     unsafe extern "system" {
                         fn RoundRect(dc: H, left: i32, top: i32, right: i32, bottom: i32, w: i32, h: i32) -> i32;
                     }
-                    let card = CreateSolidBrush(if light { 0xffffff } else { 0x292929 });
-                    let border = CreatePen(0, 1, if light { 0xe0e0e0 } else { 0x383838 });
+                    let card = CreateSolidBrush(if light { 0xffffff } else { 0x232323 });
+                    let border = CreatePen(0, 1, if light { 0xd8d8d8 } else { 0x353535 });
                     let old_brush = SelectObject(dc, card);
                     let old_pen = SelectObject(dc, border);
                     let dx = GetScrollPos(hwnd, 0);
@@ -1992,6 +2081,23 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     DeleteObject(card);
                     DeleteObject(border);
                 }
+                else if hwnd == a.details {
+                    #[link(name = "gdi32")]
+                    unsafe extern "system" {
+                        fn RoundRect(dc: H, left: i32, top: i32, right: i32, bottom: i32, w: i32, h: i32) -> i32;
+                    }
+                    let surface = CreateSolidBrush(if light { 0xffffff } else { 0x262626 });
+                    let border = CreatePen(0, 1, if light { 0xdcdcdc } else { 0x383838 });
+                    let old_brush = SelectObject(dc, surface);
+                    let old_pen = SelectObject(dc, border);
+                    let dy = GetScrollPos(hwnd, 1);
+                    RoundRect(dc, 12, 40 - dy, 430, 186 - dy, 10, 10);
+                    RoundRect(dc, 12, 190 - dy, 430, 264 + details_extra_height(&a.config) - dy, 10, 10);
+                    SelectObject(dc, old_brush);
+                    SelectObject(dc, old_pen);
+                    DeleteObject(surface);
+                    DeleteObject(border);
+                }
                 SetTextColor(dc, fg);
                 SetBkMode(dc, 1);
                 SelectObject(dc, a.small);
@@ -2003,7 +2109,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     GetClientRect(hwnd, &mut client);
                     let meter_dpi = a.extra_meters.iter().find(|meter| meter.hwnd == hwnd).map(|meter| meter.dpi).unwrap_or(a.meter_dpi);
                     let meter_layout = layout::responsive_meter(client.right, client.bottom, meter_dpi, &selected, a.config.ram_format == 2);
-                    let muted = if light { 0x5f5f5f } else { 0xa0a0a0 };
+                    let muted = if light { rgb(0x55, 0x55, 0x55) } else { rgb(0xb8, 0xb8, 0xb8) };
                     let accent = match (a.config.palette, light) {
                         (1, false) => rgb(0x6c, 0xcb, 0x8a),
                         (1, true) => rgb(0x18, 0x80, 0x38),
@@ -2017,8 +2123,8 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                             0 => ("CPU ".to_string(), percentage(s.cpu)),
                             1 => (if a.config.all_gpus { format!("GPU{} ", a.gpus.iter().position(|(id, _)| id.eq_ignore_ascii_case(&s.gpu_id)).unwrap_or(0) + 1) } else { "GPU ".to_string() }, percentage(s.gpu)),
                             2 => ("RAM ".to_string(), ram_value(s.ram, s.used, a.config.ram_format)),
-                            3 => ("↓ ".to_string(), rate(s.download, a.config.bits)),
-                            4 => ("↑ ".to_string(), rate(s.upload, a.config.bits)),
+                            3 => ("DL ".to_string(), rate(s.download, a.config.bits)),
+                            4 => ("UL ".to_string(), rate(s.upload, a.config.bits)),
                             CPU_CLOCK => ("Clock ".to_string(), cpu_clock(s.cpu_mhz)),
                             DISK_READ => ("Disk R ".to_string(), rate(s.disk_read, false)),
                             DISK_WRITE => ("Disk W ".to_string(), rate(s.disk_write, false)),
@@ -2045,11 +2151,12 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         SelectObject(dc, font);
                         let fits = selected.iter().enumerate().all(|(slot, &i)| {
                             let (left, top, right, bottom) = meter_layout.cells[slot];
+                            let icon = if readings[slot].0.is_empty() { 0 } else { scale_pixels(18, meter_dpi, 96) };
                             let chart = if i < 5 && a.config.charts[i] { scale_pixels(18, meter_dpi, 96).min((right - left) / 3) } else { 0 };
                             let text = wide(&format!("{}{}", readings[slot].0, readings[slot].1));
                             let mut extent = [0; 2];
                             GetTextExtentPoint32W(dc, text.as_ptr(), (text.len() - 1) as i32, &mut extent) != 0
-                                && extent[0] <= right - left - chart && extent[1] <= bottom - top
+                                && extent[0] + icon + scale_pixels(8, meter_dpi, 96) <= right - left - chart && extent[1] <= bottom - top
                         });
                         if fits || font_px == 1 { break font; }
                         SelectObject(dc, a.small);
@@ -2057,6 +2164,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                         font_px -= 1;
                     };
                     if !fitted_font.is_null() {
+                    let value_font = CreateFontW(-font_px, 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr());
                     for (slot, &i) in selected.iter().enumerate() {
                         let (left, top, right, bottom) = meter_layout.cells[slot];
                         if right <= left || bottom <= top || meter_layout.font_px <= 0 {
@@ -2093,13 +2201,19 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                             }
                             _ => fg,
                         };
+                        let icon_width = if prefix.is_empty() {
+                            0
+                        } else {
+                            draw_metric_icon(dc, i, Rect { left, top, right: text_right, bottom }, accent, meter_dpi)
+                        };
+                        let text_left = left + icon_width;
                         let mut cell = Rect {
-                            left,
+                            left: text_left,
                             top,
                             right: text_right,
                             bottom,
                         };
-                        SetTextColor(dc, if i == 3 || i == 4 { accent } else { muted });
+                        SetTextColor(dc, muted);
                         DrawTextW(dc, wide(prefix).as_ptr(), -1, &mut cell, 0x824);
                         let mut size = [0i32; 2];
                         GetTextExtentPoint32W(
@@ -2109,13 +2223,17 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                             &mut size,
                         );
                         let mut cell = Rect {
-                            left: (left + size[0]).min(text_right),
+                            left: (text_left + size[0]).min(text_right),
                             top,
                             right: text_right,
                             bottom,
                         };
+                        if !value_font.is_null() {
+                            SelectObject(dc, value_font);
+                        }
                         SetTextColor(dc, value_color);
                         DrawTextW(dc, wide(&value).as_ptr(), -1, &mut cell, 0x824 | 0x8000);
+                        SelectObject(dc, fitted_font);
                         if chart_width > 0 {
                             let chart_left = text_right + 1;
                             let inset = scale_pixels(2, meter_dpi, 96);
@@ -2127,6 +2245,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     }
                     SelectObject(dc, a.small);
                     DeleteObject(fitted_font);
+                    if !value_font.is_null() { DeleteObject(value_font); }
                     }
                 } else if hwnd == a.details {
                     let name = a
@@ -2225,6 +2344,10 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     fn SetDCBrushColor(dc: H, color: u32) -> u32;
                     fn GetStockObject(index: i32) -> H;
                     fn SetBkColor(dc: H, color: u32) -> u32;
+                }
+                if msg == 0x138 && hwnd == app(hwnd).details {
+                    SetBkMode(wp as H, 1);
+                    return GetStockObject(5) as isize;
                 }
                 let color = if hwnd == app(hwnd).settings {
                     if light { 0xffffff } else { 0x292929 }
@@ -2567,5 +2690,17 @@ mod transaction_tests {
     fn ram_percent_and_used_have_a_separator() {
         assert_eq!(super::ram_value(Some(66.0), 10_737_418_240, 2), "66% · 10.0 GiB");
         assert_eq!(super::ram_value(None, 0, 2), "--");
+    }
+
+    #[test]
+    fn accepted_worker_sample_replaces_displayed_snapshot() {
+        let settings = super::settings::Settings::default();
+        let mut current = super::sampler::Snapshot::default();
+        let mut next = super::sampler::Snapshot::default();
+        next.cpu = Some(42.0);
+        next.ram = Some(73.0);
+        assert!(super::accept_snapshot(&settings, &mut current, next));
+        assert_eq!(current.cpu, Some(42.0));
+        assert_eq!(current.ram, Some(73.0));
     }
 }

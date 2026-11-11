@@ -85,6 +85,12 @@ impl Settings {
                         return Err("Invalid theme".into());
                     }
                 }
+                "icon_style" => {
+                    let style: u32 = value.parse().map_err(|_| "Invalid icon style")?;
+                    if style > 1 {
+                        return Err("Invalid icon style".into());
+                    }
+                }
                 "visible" => {
                     if value.len() != 5
                         || !value.bytes().all(|c| c == b'0' || c == b'1')
@@ -246,6 +252,11 @@ pub fn save(settings: &Settings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn obsolete_icon_style_is_removed_from_saved_settings() {
+        let settings = Settings::parse("icon_style=1\n").unwrap();
+        assert!(!settings.serialize().contains("icon_style="));
+    }
     #[test]
     fn installed_font_names_are_preserved() {
         let settings = Settings::parse("font=Arial Narrow\n").unwrap();

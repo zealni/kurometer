@@ -5,6 +5,10 @@ edition = "2024"
 publish = false
 
 [[bin]]
+name = "Kurmon"
+path = "src/main.rs"
+
+[[bin]]
 name = "taskbar-probe"
 path = "tools/taskbar_probe.rs"
 

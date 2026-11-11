@@ -16,7 +16,7 @@ BEGIN
             VALUE "FileDescription", "Kurmon"
             VALUE "FileVersion", "0.1.0.0"
             VALUE "InternalName", "Kurmon"
-            VALUE "OriginalFilename", "taskbar-system-monitor.exe"
+            VALUE "OriginalFilename", "Kurmon.exe"
             VALUE "ProductName", "Kurmon"
             VALUE "ProductVersion", "0.1.0.0"
         END

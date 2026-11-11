@@ -8,6 +8,9 @@
 - The revised uninstaller was exercised with isolated `LOCALAPPDATA`/`APPDATA` and mocked registry removal: unrelated files and subdirectories survived `-RemoveSettings`; owned files and empty directories were removed; without the flag, preferences remained.
 - In an isolated preferences profile on the primary taskbar, the updated build rendered its opaque meter, RAM percentage and used GiB with a separator, and history lines. Switching to transparent mode through Settings remained visible and saved correctly. The compact two-column Settings dialog and taskbar context-menu interaction were inspected on the live desktop.
 - Scan-generation and startup transaction rollback branches passed unit tests; actual registry failure injection was not performed on the user's account.
+- The font-dependent experimental metric symbols were removed after they rendered ambiguously. Existing `icon_style` preferences are accepted once for migration but omitted from subsequent saves; the meter uses readable metric labels.
+- The worker-to-UI snapshot handoff now replaces the displayed snapshot on every accepted sample. A regression test covers the state transition; the installed build was observed showing live CPU, three GPU, RAM, download, and upload values after restart.
+- The meter now uses DPI-scaled GDI vector icons, muted labels, semibold values, and width fitting that accounts for icon and bold-text width. The overview groups summary and source status in neutral cards; the settings panel retains native named controls and keyboard behavior.
 
 - The installed running executable reports FileDescription and ProductName `Kurmon` through Windows file-version metadata. The Task Manager window was not readable through the desktop capture during verification, so its displayed search result remains unverified.
 
