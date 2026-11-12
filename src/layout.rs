@@ -117,6 +117,25 @@ pub fn popup_position(
 pub fn relevant_shell_event(event: u32, target_is_taskbar: bool) -> bool {
     event == 3 || ((0x8000..=0x800c).contains(&event) && target_is_taskbar)
 }
+
+pub fn fullscreen_shell_exempt(class: &str, process_image: &[u16]) -> bool {
+    if matches!(class, "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+        return true;
+    }
+    let name = process_image
+        .iter()
+        .rposition(|&c| c == b'\\' as u16 || c == b'/' as u16)
+        .map_or(process_image, |i| &process_image[i + 1..]);
+    [b"StartMenuExperienceHost.exe".as_slice(), b"SearchHost.exe".as_slice()]
+        .iter()
+        .any(|expected| {
+            name.len() == expected.len()
+                && name.iter().zip(expected.iter()).all(|(&actual, &expected)| {
+                    actual <= 0x7f && (actual as u8).eq_ignore_ascii_case(&expected)
+                })
+        })
+}
+
 pub fn recreate_meter(attached_parent: usize, current_parent: usize, meter_alive: bool, rejected_parent: usize) -> bool {
     !meter_alive || (attached_parent != current_parent && rejected_parent != current_parent)
 }
@@ -277,6 +296,19 @@ mod tests {
         assert!(relevant_shell_event(0x8002, true));
         assert!(relevant_shell_event(3, false));
     }
+    #[test]
+    fn start_menu_host_is_exempt_from_fullscreen_hiding() {
+        let image: Vec<_> = r"C:\Windows\SystemApps\StartMenuExperienceHost.exe".encode_utf16().collect();
+        assert!(fullscreen_shell_exempt("Windows.UI.Core.CoreWindow", &image));
+        let mixed_case: Vec<_> = r"c:/windows/systemapps/startmenuexperiencehost.EXE".encode_utf16().collect();
+        assert!(fullscreen_shell_exempt("Windows.UI.Core.CoreWindow", &mixed_case));
+        assert!(fullscreen_shell_exempt("Progman", &[]));
+        let search: Vec<_> = r"C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\SearchHost.exe".encode_utf16().collect();
+        assert!(fullscreen_shell_exempt("Windows.UI.Core.CoreWindow", &search));
+        assert!(fullscreen_shell_exempt("Shell_SecondaryTrayWnd", &[]));
+        assert!(!fullscreen_shell_exempt("Chrome_WidgetWin_1", &[]));
+    }
+
     #[test]
     fn display_choices_resolve_primary_all_specific_and_stale_ids() {
         let displays = [("DISPLAY1", true), ("DISPLAY2", false)];

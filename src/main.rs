@@ -243,6 +243,8 @@ unsafe extern "system" {
     fn CreateMutexW(attributes: H, owner: i32, name: *const u16) -> H;
     fn GetLastError() -> u32;
     fn CloseHandle(h: H) -> i32;
+    fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> H;
+    fn QueryFullProcessImageNameW(process: H, flags: u32, image: *mut u16, size: *mut u32) -> i32;
 }
 #[link(name = "shell32")]
 unsafe extern "system" {
@@ -902,20 +904,40 @@ fn fullscreen(screen: displays::Rect) -> bool {
         unsafe extern "system" {
             fn GetForegroundWindow() -> H;
             fn GetClassNameW(hwnd: H, name: *mut u16, max: i32) -> i32;
+            fn GetWindowThreadProcessId(hwnd: H, process_id: *mut u32) -> u32;
         }
         let foreground = GetForegroundWindow();
         let mut class = [0u16; 100];
         let length = GetClassNameW(foreground, class.as_mut_ptr(), 100);
         let name = String::from_utf16_lossy(&class[..length as usize]);
-        if ["Progman", "WorkerW", "Shell_TrayWnd"].contains(&name.as_str()) {
+        if layout::fullscreen_shell_exempt(&name, &[]) {
             return false;
         }
         let mut r = Rect::default();
-        GetWindowRect(foreground, &mut r) != 0
-            && r.left <= screen.left
-            && r.top <= screen.top
-            && r.right >= screen.right
-            && r.bottom >= screen.bottom
+        if GetWindowRect(foreground, &mut r) == 0
+            || r.left > screen.left
+            || r.top > screen.top
+            || r.right < screen.right
+            || r.bottom < screen.bottom
+        {
+            return false;
+        }
+        let mut process_id = 0;
+        let thread_id = GetWindowThreadProcessId(foreground, &mut process_id);
+        if thread_id != 0 && process_id != 0 {
+            let process = OpenProcess(0x1000, 0, process_id);
+            if !process.is_null() {
+                let mut image = [0u16; 1024];
+                let mut length = image.len() as u32;
+                let start_menu = QueryFullProcessImageNameW(process, 0, image.as_mut_ptr(), &mut length) != 0
+                    && layout::fullscreen_shell_exempt(&name, &image[..length as usize]);
+                CloseHandle(process);
+                if start_menu {
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 unsafe fn create_meter(a: &mut App, bar: H, primary: bool) -> H {

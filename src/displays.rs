@@ -8,8 +8,7 @@ struct MonitorInfo { size: u32, monitor: Rect, work: Rect, flags: u32, device: [
 #[link(name = "user32")]
 unsafe extern "system" {
     fn EnumDisplayMonitors(dc: H, clip: *const Rect, callback: unsafe extern "system" fn(H, H, *mut Rect, isize) -> i32, data: isize) -> i32;
-    fn EnumWindows(callback: unsafe extern "system" fn(H, isize) -> i32, data: isize) -> i32;
-    fn GetClassNameW(hwnd: H, name: *mut u16, max: i32) -> i32;
+    fn FindWindowExW(parent: H, after: H, class: *const u16, title: *const u16) -> H;
     fn MonitorFromWindow(hwnd: H, flags: u32) -> H;
     fn GetMonitorInfoW(monitor: H, info: *mut MonitorInfo) -> i32;
     fn IsWindowVisible(hwnd: H) -> i32;
@@ -30,25 +29,35 @@ unsafe extern "system" fn collect_monitor(monitor: H, _: H, _: *mut Rect, data: 
     }
     1
 }
-unsafe extern "system" fn collect_taskbar(hwnd: H, data: isize) -> i32 {
-    if unsafe { IsWindowVisible(hwnd) } == 0 { return 1; }
-    let mut class = [0u16; 64];
-    let count = unsafe { GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32) } as usize;
-    let class = String::from_utf16_lossy(&class[..count]);
-    if class != "Shell_TrayWnd" && class != "Shell_SecondaryTrayWnd" { return 1; }
-    let monitor = unsafe { MonitorFromWindow(hwnd, 2) } as usize;
-    let records = unsafe { &mut *(data as *mut Vec<MonitorRecord>) };
-    if let Some(record) = records.iter_mut().find(|record| record.handle == monitor) {
-        if let Some(display) = record.info.as_mut() { display.taskbar = hwnd; }
+fn collect_taskbar_class(class: *const u16, records: &mut [MonitorRecord]) {
+    let mut after = std::ptr::null_mut();
+    let mut seen = [std::ptr::null_mut(); 64];
+    for count in 0..seen.len() {
+        let hwnd = unsafe { FindWindowExW(std::ptr::null_mut(), after, class, std::ptr::null()) };
+        if hwnd.is_null() || seen[..count].contains(&hwnd) {
+            break;
+        }
+        seen[count] = hwnd;
+        after = hwnd;
+        if unsafe { IsWindowVisible(hwnd) } == 0 {
+            continue;
+        }
+        let monitor = unsafe { MonitorFromWindow(hwnd, 2) } as usize;
+        if let Some(record) = records.iter_mut().find(|record| record.handle == monitor) {
+            if let Some(display) = record.info.as_mut() {
+                display.taskbar = hwnd;
+            }
+        }
     }
-    1
 }
 pub fn list() -> Vec<Display> {
     let mut records = Vec::<MonitorRecord>::new();
     unsafe {
         EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), collect_monitor, &mut records as *mut _ as isize);
-        EnumWindows(collect_taskbar, &mut records as *mut _ as isize);
     }
+    // EnumWindows skips ZBID_SYSTEM_TOOLS (band 6) taskbars when Start or Search is open.
+    collect_taskbar_class(windows::core::w!("Shell_TrayWnd").as_ptr(), &mut records);
+    collect_taskbar_class(windows::core::w!("Shell_SecondaryTrayWnd").as_ptr(), &mut records);
     records.into_iter().filter_map(|record| record.info).collect()
 }
 pub fn selected(id: &str) -> Option<Display> {
@@ -75,5 +84,13 @@ mod tests {
             primary: true,
         };
         assert_eq!(at_point(&[display], [100, 1050]).unwrap().work.bottom, 1032);
+    }
+
+    #[test]
+    fn list_includes_visible_primary_taskbar_when_present() {
+        let bar = unsafe { FindWindowExW(std::ptr::null_mut(), std::ptr::null_mut(), windows::core::w!("Shell_TrayWnd").as_ptr(), std::ptr::null()) };
+        if !bar.is_null() && unsafe { IsWindowVisible(bar) } != 0 {
+            assert!(list().iter().any(|display| display.taskbar == bar));
+        }
     }
 }
