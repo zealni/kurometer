@@ -15,6 +15,8 @@ use windows::{
     Win32::{System::Com::*},
     core::w,
 };
+const VERSION: &str = env!("KURMON_VERSION");
+const SHORT_VERSION: &str = env!("KURMON_SHORT_VERSION");
 type H = *mut c_void;
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
@@ -712,6 +714,24 @@ fn rate(v: Option<f64>, bits: bool) -> String {
     }
     format!("{v:.1} {}", units[unit])
 }
+fn drained_snapshot(
+    latest: Option<(sampler::Snapshot, Instant)>,
+    last: &mut Instant,
+    interval: u32,
+) -> Option<(sampler::Snapshot, Instant, bool)> {
+    match latest {
+        Some((snapshot, stamp)) => {
+            *last = stamp;
+            Some((snapshot, stamp, true))
+        }
+        None if last.elapsed().as_secs() < u64::from(interval) * 3 => None,
+        None => {
+            let mut stale = sampler::Snapshot::default();
+            stale.network_status = "Stale: waiting for sampler".into();
+            Some((stale, *last, false))
+        }
+    }
+}
 fn accept_snapshot(
     config: &settings::Settings,
     current: &mut sampler::Snapshot,
@@ -812,8 +832,8 @@ fn draw_button(item: &DrawItem, light: bool) {
 fn settings_control_position(x: i32, y: i32, wide: bool) -> (i32, i32) {
     let (x, y) = if wide && (466..=900).contains(&y) {
         (x + 480, y - 450)
-    } else if wide && y == 910 {
-        (x, 500)
+    } else if wide && (910..=925).contains(&y) {
+        (x, 500 + (y - 910))
     } else {
         (x, y)
     };
@@ -1396,6 +1416,7 @@ fn position_details(a: &App, panel: H, owner: H) {
                 let dx = GetScrollPos(panel, 0);
                 SetWindowPos(get_child(panel, 501), null_mut(), 24 - dx, y, 0, 0, 0x15);
                 SetWindowPos(get_child(panel, 502), null_mut(), 146 - dx, y, 0, 0, 0x15);
+                SetWindowPos(get_child(panel, 503), null_mut(), 286 - dx, y + 6, 0, 0, 0x15);
                 SetWindowPos(get_child(panel, 620), null_mut(), 0, 0, 390, 68 + details_extra_height(&a.config, a.gpus.len()), 0x16);
                 let mut client = Rect::default();
                 for _ in 0..2 {
@@ -1558,6 +1579,17 @@ fn details(hwnd: H) {
             130,
             32,
             0x10000 | 0xb,
+        );
+        control(
+            h,
+            "STATIC",
+            SHORT_VERSION,
+            503,
+            286,
+            details_content_height(&a.config, a.gpus.len()) - 34,
+            160,
+            20,
+            0,
         );
         position_details(a, h, a.details_owner);
         ShowWindow(h, 5);
@@ -1854,6 +1886,8 @@ fn open_settings(hwnd: H) {
         SendMessageW(disk, 0xf1, a.config.disk_activity as usize, 0);
         control(h, "BUTTON", "Save settings", 201, 24, 910, 160, 36, 0x10000 | 0xb);
         control(h, "BUTTON", "Cancel", 202, 200, 910, 110, 36, 0x10000 | 0xb);
+        let version_label = format!("v{VERSION}");
+        control(h, "STATIC", &version_label, 0, 330, 918, 550, 24, 0);
         let mut client = Rect::default();
         GetClientRect(h, &mut client);
         let (content_width, content_height) = settings_content_size(h);
@@ -2089,16 +2123,10 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     place(a);
                     reconcile_extra_meters(a);
                 }
-                let (next, stamp, sampled) = match a.worker.latest() {
-                    Some((snapshot, stamp)) => (snapshot, stamp, true),
-                    None => {
-                        if a.last.elapsed().as_secs() < u64::from(a.config.interval) * 3 {
-                            return 0;
-                        }
-                        let mut stale = sampler::Snapshot::default();
-                        stale.network_status = "Stale: waiting for sampler".into();
-                        (stale, a.last, false)
-                    }
+                let Some((next, stamp, sampled)) =
+                    drained_snapshot(a.worker.latest(), &mut a.last, a.config.interval)
+                else {
+                    return 0;
                 };
                 let new_sample = sampled && a.history_stamp != Some(stamp);
                 if new_sample {
@@ -2594,7 +2622,7 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
                     fn GetStockObject(index: i32) -> H;
                     fn SetBkColor(dc: H, color: u32) -> u32;
                 }
-                if msg == 0x138 && hwnd == app(hwnd).details {
+                if msg == 0x138 {
                     SetBkMode(wp as H, 1);
                     return GetStockObject(5) as isize;
                 }
@@ -2652,6 +2680,10 @@ unsafe extern "system" fn proc(hwnd: H, msg: u32, wp: usize, lp: isize) -> isize
 }
 fn main() {
     unsafe {
+        if std::env::args().any(|a| a == "--version" || a == "-v" || a == "-V" || a == "version") {
+            println!("Kurmon {VERSION}");
+            return;
+        }
         if std::env::args().any(|a| a == "--sample") {
             let devices = sampler::adapters();
             for d in &devices {
@@ -2959,6 +2991,18 @@ mod transaction_tests {
     }
 
     #[test]
+    fn received_reading_prevents_false_stale_blanking() {
+        let now = std::time::Instant::now();
+        let mut last = now - std::time::Duration::from_secs(120);
+        let (_, stamp, sampled) =
+            super::drained_snapshot(Some((Default::default(), now)), &mut last, 3600).unwrap();
+        assert!(sampled);
+        assert_eq!(last, stamp);
+        // An empty tick right after a reading must keep the meters, not blank them.
+        assert!(super::drained_snapshot(None, &mut last, 3600).is_none());
+    }
+
+    #[test]
     fn accepted_worker_sample_replaces_displayed_snapshot() {
         let settings = super::settings::Settings::default();
         let mut current = super::sampler::Snapshot::default();
@@ -2995,5 +3039,12 @@ mod transaction_tests {
         assert_eq!(super::details_content_height(&config, 2) - baseline, 140);
         config.visible[2] = false;
         assert_eq!(super::details_content_height(&config, 2), baseline);
+    }
+    #[test]
+    fn version_tracker_is_populated() {
+        assert!(!super::VERSION.is_empty());
+        assert!(super::VERSION.starts_with("0."));
+        assert!(!super::SHORT_VERSION.is_empty());
+        assert!(super::SHORT_VERSION.starts_with("v0."));
     }
 }
